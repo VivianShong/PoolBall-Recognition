@@ -584,6 +584,32 @@ void WriteEvaluationCsv(const vector<ImageEvaluation>& images,
     }
 }
 
+vector<Point> GroundTruthOutline(const BallPrediction& truth, const Mat& inverse,
+    double scale, double camera_radius = BALL_RADIUS)
+{
+    vector<Point2f> center;
+    perspectiveTransform(vector<Point2f>{truth.center}, center, inverse);
+    // The spreadsheet provides centers, not radii. These are visual circle
+    // markers in the camera view; they do not change matching or evaluation.
+    vector<Point> outline;
+    for (int k = 0; k < 72; ++k) {
+        const double angle = 2.0 * CV_PI * k / 72;
+        outline.emplace_back(cvRound((center[0].x + camera_radius * cos(angle)) * scale),
+            cvRound((center[0].y + camera_radius * sin(angle)) * scale));
+    }
+    return outline;
+}
+
+void DrawOverlayLabel(Mat& image, const string& label, Point position, Scalar colour)
+{
+    position.x = max(2, min(position.x, image.cols - 80));
+    position.y = max(15, min(position.y, image.rows - 4));
+    putText(image, label, position, FONT_HERSHEY_SIMPLEX,
+        0.38, Scalar(0, 0, 0), 3, LINE_AA);
+    putText(image, label, position, FONT_HERSHEY_SIMPLEX,
+        0.38, colour, 1, LINE_AA);
+}
+
 Mat DrawDetectedCircles(const Mat& image, const vector<ClassifiedCircle>& circles,
     const string& filename, size_t candidate_count)
 {
@@ -593,25 +619,117 @@ Mat DrawDetectedCircles(const Mat& image, const vector<ClassifiedCircle>& circle
     for (const auto& classified : circles) {
         const Vec3f& ball = classified.detection.image_circle;
         const Point center(cvRound(ball[0] * scale), cvRound(ball[1] * scale));
-        circle(preview, center, cvRound(ball[2] * scale), Scalar(0, 255, 0), 2);
-        circle(preview, center, 2, Scalar(0, 0, 255), FILLED);
-        const Point text = center + Point(-8, -cvRound(ball[2] * scale) - 4);
-        putText(preview, classified.label, text, FONT_HERSHEY_SIMPLEX,
-            0.5, Scalar(0, 0, 0), 3, LINE_AA);
-        putText(preview, classified.label, text, FONT_HERSHEY_SIMPLEX,
-            0.5, Scalar(255, 255, 255), 1, LINE_AA);
+        circle(preview, center, cvRound(ball[2] * scale), Scalar(0, 255, 0), 1, LINE_AA);
+        DrawOverlayLabel(preview, classified.label + " ", center + Point(-7, 5),
+            Scalar(255, 255, 255));
     }
     copyMakeBorder(preview, preview, 60, 0, 0, 0, BORDER_CONSTANT, Scalar(30, 30, 30));
     putText(preview, filename + " - " + to_string(circles.size()) + " retained / "
-        + to_string(candidate_count) + " candidates", Point(12, 23),
+        + to_string(candidate_count) + " candidates", Point(12, 24),
         FONT_HERSHEY_SIMPLEX, 0.6, Scalar(255, 255, 255), 1, LINE_AA);
-    putText(preview, "Press any key for next image; Esc stops evaluation.",
-        Point(12, 47), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(255, 255, 255), 1, LINE_AA);
+    putText(preview, "Green circles and white labels: classifier output. Any key: next image; Esc: stop.",
+        Point(12, 49), FONT_HERSHEY_SIMPLEX, 0.48, Scalar(220, 220, 220), 1, LINE_AA);
     return preview;
+}
+
+Mat DrawGroundTruthCircles(const Mat& image, const vector<BallPrediction>& truth,
+    const string& filename)
+{
+    const double scale = min({1.0, 1100.0 / image.cols, 650.0 / image.rows});
+    Mat preview;
+    resize(image, preview, Size(cvRound(image.cols * scale), cvRound(image.rows * scale)));
+    const Mat inverse = TablePerspectiveTransform().inv();
+    for (const auto& actual : truth) {
+        const vector<Point> circle_outline =
+            GroundTruthOutline(actual, inverse, scale, BALL_RADIUS + 3.0);
+        const vector<vector<Point>> outline{circle_outline};
+        polylines(preview, outline, true, Scalar(255, 255, 0), 1, LINE_AA);
+        vector<Point2f> camera_center;
+        perspectiveTransform(vector<Point2f>{actual.center}, camera_center, inverse);
+        const Point center(cvRound(camera_center[0].x * scale), cvRound(camera_center[0].y * scale));
+        DrawOverlayLabel(preview, actual.label + " ", center + Point(-7, 5),
+            Scalar(255, 255, 255));
+    }
+    copyMakeBorder(preview, preview, 60, 0, 0, 0, BORDER_CONSTANT, Scalar(30, 30, 30));
+    putText(preview, filename + " - " + to_string(truth.size()) + " valid supplied centers",
+        Point(12, 24), FONT_HERSHEY_SIMPLEX, 0.6, Scalar(255, 255, 255), 1, LINE_AA);
+    putText(preview, "Thin cyan circles with ball labels: supplied ground truth.",
+        Point(12, 49), FONT_HERSHEY_SIMPLEX, 0.48, Scalar(255, 255, 0), 1, LINE_AA);
+    return preview;
+}
+
+Mat DrawDetectionOutcomes(const Mat& image, const vector<ClassifiedCircle>& circles,
+    const vector<BallPrediction>& truth, const string& filename)
+{
+    vector<BallPrediction> predictions;
+    for (const auto& circle : circles)
+        predictions.push_back({circle.detection.table_center, circle.label});
+    const vector<int> matches = MatchCenters(predictions, truth);
+    const EvaluationResult result = Evaluation(predictions, truth);
+    vector<int> prediction_truth(circles.size(), -1);
+    for (size_t i = 0; i < matches.size(); ++i)
+        if (matches[i] >= 0) prediction_truth[matches[i]] = static_cast<int>(i);
+    const double scale = min({1.0, 1100.0 / image.cols, 650.0 / image.rows});
+    Mat preview;
+    resize(image, preview, Size(cvRound(image.cols * scale), cvRound(image.rows * scale)));
+    const Mat inverse = TablePerspectiveTransform().inv();
+    for (size_t i = 0; i < truth.size(); ++i) {
+        if (matches[i] >= 0) continue;
+        const vector<vector<Point>> outline{GroundTruthOutline(truth[i], inverse, scale)};
+        polylines(preview, outline, true, Scalar(255, 0, 255), 1, LINE_AA);
+        vector<Point2f> center;
+        perspectiveTransform(vector<Point2f>{truth[i].center}, center, inverse);
+        DrawOverlayLabel(preview, "GT:" + truth[i].label,
+            Point(cvRound(center[0].x * scale) - 8, cvRound(center[0].y * scale) + 22),
+            Scalar(255, 0, 255));
+    }
+    for (size_t i = 0; i < circles.size(); ++i) {
+        const Vec3f& ball = circles[i].detection.image_circle;
+        const Point center(cvRound(ball[0] * scale), cvRound(ball[1] * scale));
+        const int actual = prediction_truth[i];
+        const Scalar colour = actual < 0 ? Scalar(0, 0, 255) : Scalar(0, 255, 0);
+        circle(preview, center, cvRound(ball[2] * scale), colour, 1, LINE_AA);
+        string label = circles[i].label;
+        if (actual >= 0 && label != truth[actual].label)
+            label = "P:" + label + "/GT:" + truth[actual].label;
+        DrawOverlayLabel(preview, label,
+            center + Point(-8, -cvRound(ball[2] * scale) - 5), colour);
+    }
+    copyMakeBorder(preview, preview, 105, 0, 0, 0, BORDER_CONSTANT, Scalar(30, 30, 30));
+    putText(preview, filename + " - TP: " + to_string(result.tp) + "  FP: "
+        + to_string(result.fp) + "  FN: " + to_string(result.fn), Point(12, 24),
+        FONT_HERSHEY_SIMPLEX, 0.6, Scalar(255, 255, 255), 1, LINE_AA);
+    putText(preview, "Green: matched center (TP). Red: unmatched prediction (FP). Magenta: missed GT (FN).",
+        Point(12, 49), FONT_HERSHEY_SIMPLEX, 0.45, Scalar(220, 220, 220), 1, LINE_AA);
+    putText(preview, "Correct labels: " + to_string(result.correct_labels) + "/" + to_string(result.tp)
+        + " matched. P/GT marks label errors; these still count as detection TP.",
+        Point(12, 72), FONT_HERSHEY_SIMPLEX, 0.45, Scalar(220, 220, 220), 1, LINE_AA);
+    putText(preview, "Relative to provisional supplied GT. Any key: next image; Esc: stop.",
+        Point(12, 96), FONT_HERSHEY_SIMPLEX, 0.48, Scalar(220, 220, 220), 1, LINE_AA);
+    return preview;
+}
+
+void SaveEvaluationViews(const string& filename, const Mat& ground_truth, const Mat& labels, const Mat& outcomes)
+{
+    try {
+        const filesystem::path directory = "output/evaluation/visualizations";
+        filesystem::create_directories(directory);
+        const string stem = filesystem::path(filename).stem().string();
+        if (!imwrite((directory / (stem + "_ground_truth.png")).string(), ground_truth)
+            || !imwrite((directory / (stem + "_labels.png")).string(), labels)
+            || !imwrite((directory / (stem + "_outcomes.png")).string(), outcomes))
+            cerr << "Could not save visualization for " << filename << '\n';
+    } catch (const std::exception& error) {
+        cerr << "Could not save evaluation views: " << error.what() << '\n';
+    }
 }
 
 void RunEvaluation(bool visualize = true)
 {
+    // MyApplication loads the source images first; clear those windows before
+    // starting the per-table evaluation sequence.
+    if (visualize)
+        destroyAllWindows();
     cout << "\nHough detection + HLS minimum-cost classification: Table1-6; AllBalls excluded as training data.\n"
          << "Transformed image: 1434x683. Match distance <= " << MATCH_DISTANCE
          << " pixels (half of the 21.5-pixel ball radius).\n"
@@ -662,14 +780,22 @@ void RunEvaluation(bool visualize = true)
         image_results.push_back({supplied.filename, result, excluded - excluded_before});
         AddEvaluation(total, result);
         ++evaluated_images;
+        const Mat ground_truth_view = DrawGroundTruthCircles(source, truth, supplied.filename);
+        const Mat labels_view = DrawDetectedCircles(source, circles, supplied.filename, detections.size());
+        const Mat outcomes_view = DrawDetectionOutcomes(source, circles, truth, supplied.filename);
+        SaveEvaluationViews(supplied.filename, ground_truth_view, labels_view, outcomes_view);
         if (visualize) {
-            imshow("Test image circle detection", DrawDetectedCircles(source, circles, supplied.filename, detections.size()));
-            if (waitKey(0) == 27)
-                break;
+            imshow("Pool ball evaluation", labels_view);
+            if (waitKey(0) == 27) break;
+            imshow("Pool ball evaluation", ground_truth_view);
+            if (waitKey(0) == 27) break;
+            imshow("Pool ball evaluation", outcomes_view);
+            if (waitKey(0) == 27) break;
         }
     }
-    if (visualize && evaluated_images > 0)
-        destroyWindow("Test image circle detection");
+    if (visualize && evaluated_images > 0) {
+        destroyWindow("Pool ball evaluation");
+    }
     PrintEvaluation("Pooled total", total);
     cout << "Evaluated images: " << evaluated_images << "/6; excluded GT entries: " << excluded << '\n';
     cout << "\nConfusion matrix: rows=ground truth, columns=prediction.\n"
