@@ -17,7 +17,36 @@ const Point2f TABLE_TOP_RIGHT(1570, 21);
 const Point2f TABLE_BOTTOM_RIGHT(1888, 451);
 const Point2f TABLE_BOTTOM_LEFT(38, 472);
 
+// Labelled manually with --label flag
+// Source: Media/Pool/AllBalls.jpeg (1931 x 509)
+// Centers and radii are in original image pixels.
 
+struct LabeledCircle {
+    const char* label;
+    cv::Point2f center;
+    float radius;
+};
+
+const std::vector<LabeledCircle> labeled_circles = {
+    {"9", cv::Point2f(1147.50000f, 193.500000f), 22.3999996f},
+    {"White", cv::Point2f(1036.50000f, 171.500000f), 22.3999996f},
+    {"2", cv::Point2f(1193.50000f, 146.500000f), 21.2999992f},
+    {"1", cv::Point2f(1143.50000f, 147.500000f), 21.2999992f},
+    {"8", cv::Point2f(1532.50000f, 143.500000f), 22.3999996f},
+    {"4", cv::Point2f(1303.50000f, 147.500000f), 22.3999996f},
+    {"13", cv::Point2f(1380.50000f, 193.500000f), 22.3999996f},
+    {"12", cv::Point2f(1319.50000f, 194.500000f), 22.3999996f},
+    {"5", cv::Point2f(1364.50000f, 146.500000f), 22.3999996f},
+    {"6", cv::Point2f(1418.50000f, 148.500000f), 22.3999996f},
+    {"7", cv::Point2f(1474.50000f, 146.500000f), 22.3999996f},
+    {"10", cv::Point2f(1206.50000f, 193.500000f), 22.3999996f},
+    {"3", cv::Point2f(1247.50000f, 147.500000f), 21.2999992f},
+    {"14", cv::Point2f(1446.50000f, 198.500000f), 21.2999992f},
+    {"15", cv::Point2f(1508.50000f, 195.500000f), 22.3999996f},
+    {"11", cv::Point2f(1263.50000f, 194.500000f), 21.2999992f},
+    {"net", cv::Point2f(958.500000f, 40.5000000f), 13.6000004f},
+    {"net", cv::Point2f(1562.50000f, 51.5000000f), 16.8999996f},
+};
 namespace {
 const char* LABEL_WINDOW = "AllBalls circle detection";
 
