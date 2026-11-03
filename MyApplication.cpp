@@ -84,12 +84,6 @@ vector<Vec3f> HoughDetector(const Mat& image)
         }), circles.end());
     return circles;
 }
-// TODO: replace with our logic
-string Classifier(const Mat&, const Vec3f&)
-{
-    return "White";
-}
-
 Mat TablePerspectiveTransform()
 {
     const vector<Point2f> camera = {
@@ -132,6 +126,179 @@ int BallClassIndex(const string& label)
     for (int index = 0; index < BALL_CLASSES; ++index)
         if (label == BallClassName(index)) return index;
     throw invalid_argument("Unsupported evaluation ball label: " + label);
+}
+
+
+struct HistogramReference {
+    string label;
+    Mat histogram;
+};
+
+// H, L, S bins and ranges for OpenCV's 8-bit HLS representation.
+Mat CalculateHLSHistogram(const Mat& hls, const Vec3f& circle)
+{
+    if (hls.empty() || !isfinite(circle[0]) || !isfinite(circle[1])
+        || !isfinite(circle[2]) || circle[2] <= 0)
+        return Mat();
+    const int left = max(0, static_cast<int>(floor(circle[0] - circle[2])));
+    const int top = max(0, static_cast<int>(floor(circle[1] - circle[2])));
+    const int right = min(hls.cols, static_cast<int>(ceil(circle[0] + circle[2])) + 1);
+    const int bottom = min(hls.rows, static_cast<int>(ceil(circle[1] + circle[2])) + 1);
+    if (left >= right || top >= bottom) return Mat();
+    const Rect region(left, top, right - left, bottom - top);
+    const Mat patch = hls(region);
+    Mat mask(region.size(), CV_8UC1, Scalar(0));
+    const double radius_squared = static_cast<double>(circle[2]) * circle[2];
+    for (int y = 0; y < mask.rows; ++y) {
+        uchar* row = mask.ptr<uchar>(y);
+        for (int x = 0; x < mask.cols; ++x) {
+            const double dx = x + left - circle[0];
+            const double dy = y + top - circle[1];
+            if (dx * dx + dy * dy <= radius_squared) row[x] = 255;
+        }
+    }
+    if (countNonZero(mask) == 0) return Mat();
+    const int channels[] = {0, 1, 2};
+    const int bins[] = {18, 8, 8};
+    const float hue[] = {0, 180}, lightness[] = {0, 256}, saturation[] = {0, 256};
+    const float* ranges[] = {hue, lightness, saturation};
+    Mat histogram;
+    calcHist(&patch, 1, channels, mask, histogram, 3, bins, ranges);
+    normalize(histogram, histogram, 1.0, 0.0, NORM_L1);
+    return histogram;
+}
+
+vector<HistogramReference> BuildReferenceHistograms(const Mat& all_balls,
+    const vector<LabeledCircle>& samples)
+{
+    if (all_balls.empty()) throw invalid_argument("AllBalls training image is empty.");
+    Mat hls;
+    cvtColor(all_balls, hls, COLOR_BGR2HLS);
+    vector<HistogramReference> references;
+    bool has_background = false;
+    for (const auto& sample : samples) {
+        const bool background = sample.label == "net" || sample.label == "table";
+        if (!background) BallClassIndex(sample.label);
+        Mat histogram = CalculateHLSHistogram(hls,
+            Vec3f(sample.center.x, sample.center.y, sample.radius));
+        if (histogram.empty())
+            throw invalid_argument("Reference has no image pixels: " + sample.label);
+        references.push_back({sample.label, histogram});
+        has_background = has_background || background;
+    }
+    if (!has_background)
+        throw invalid_argument("Classification requires a labeled net or table reference.");
+    return references;
+}
+
+// Minimum-cost one-to-one assignment of rows to columns (columns >= rows).
+// Unlike evaluation matching, these costs describe appearance, not position.
+vector<int> MinimumCostAssignment(const vector<vector<double>>& costs)
+{
+    const int rows = static_cast<int>(costs.size());
+    if (rows == 0) return {};
+    const int columns = static_cast<int>(costs[0].size());
+    if (columns < rows) throw invalid_argument("Assignment needs at least one column per row.");
+    for (const auto& row : costs) {
+        if (static_cast<int>(row.size()) != columns)
+            throw invalid_argument("Assignment cost matrix must be rectangular.");
+        for (double cost : row)
+            if (!isfinite(cost)) throw invalid_argument("Assignment costs must be finite.");
+    }
+    vector<double> u(rows + 1), v(columns + 1);
+    vector<int> assigned_row(columns + 1), previous(columns + 1);
+    for (int i = 1; i <= rows; ++i) {
+        assigned_row[0] = i;
+        int column = 0;
+        vector<double> minimum(columns + 1, numeric_limits<double>::infinity());
+        vector<bool> used(columns + 1, false);
+        do {
+            used[column] = true;
+            const int row = assigned_row[column];
+            double delta = numeric_limits<double>::infinity();
+            int next = 0;
+            for (int j = 1; j <= columns; ++j) {
+                if (used[j]) continue;
+                const double reduced = costs[row - 1][j - 1] - u[row] - v[j];
+                if (reduced < minimum[j]) {
+                    minimum[j] = reduced;
+                    previous[j] = column;
+                }
+                if (minimum[j] < delta) {
+                    delta = minimum[j];
+                    next = j;
+                }
+            }
+            for (int j = 0; j <= columns; ++j) {
+                if (used[j]) {
+                    u[assigned_row[j]] += delta;
+                    v[j] -= delta;
+                } else minimum[j] -= delta;
+            }
+            column = next;
+        } while (assigned_row[column] != 0);
+        do {
+            const int next = previous[column];
+            assigned_row[column] = assigned_row[next];
+            column = next;
+        } while (column != 0);
+    }
+    vector<int> assignment(rows, -1);
+    for (int j = 1; j <= columns; ++j)
+        if (assigned_row[j] != 0) assignment[assigned_row[j] - 1] = j - 1;
+    return assignment;
+}
+
+struct ClassifiedCircle {
+    DetectedCircle detection;
+    string label;
+    double histogram_distance;
+};
+
+vector<ClassifiedCircle> Classifier(const Mat& image,
+    const vector<DetectedCircle>& detections, const vector<HistogramReference>& references)
+{
+    if (detections.empty()) return {};
+    if (references.empty()) throw invalid_argument("Precompute reference histograms first.");
+    bool has_background = false;
+    for (const auto& reference : references)
+        has_background = has_background || reference.label == "net" || reference.label == "table";
+    if (!has_background) throw invalid_argument("No net/table rejection references.");
+    Mat hls;
+    cvtColor(image, hls, COLOR_BGR2HLS);
+    // Bhattacharyya distance is in [0,1]; 2 marks an unavailable ball assignment.
+    vector<vector<double>> costs(detections.size(),
+        vector<double>(BALL_CLASSES + detections.size(), 2.0));
+    for (size_t i = 0; i < detections.size(); ++i) {
+        const Mat histogram = CalculateHLSHistogram(hls, detections[i].image_circle);
+        double rejection = histogram.empty() ? 0.0 : 2.0;
+        if (!histogram.empty()) {
+            for (const auto& reference : references) {
+                const double distance = compareHist(histogram, reference.histogram, HISTCMP_BHATTACHARYYA);
+                if (reference.label == "net" || reference.label == "table")
+                    rejection = min(rejection, distance);
+                else {
+                    const int label = BallClassIndex(reference.label);
+                    costs[i][label] = min(costs[i][label], distance);
+                }
+            }
+        }
+        // There is one rejection slot per candidate, so any number can be rejected.
+        for (size_t j = BALL_CLASSES; j < costs[i].size(); ++j)
+            costs[i][j] = rejection;
+        // Prefer rejection on ties. A worse-than-background match cannot improve
+        // the global solution because rejection slots never run out.
+        for (int label = 0; label < BALL_CLASSES; ++label)
+            if (costs[i][label] >= rejection) costs[i][label] = 2.0;
+    }
+    const vector<int> assignment = MinimumCostAssignment(costs);
+    vector<ClassifiedCircle> retained;
+    for (size_t i = 0; i < detections.size(); ++i) {
+        const int label = assignment[i];
+        if (label >= 0 && label < BALL_CLASSES)
+            retained.push_back({detections[i], BallClassName(label), costs[i][label]});
+    }
+    return retained;
 }
 
 struct GroundTruthImage {
@@ -417,21 +584,27 @@ void WriteEvaluationCsv(const vector<ImageEvaluation>& images,
     }
 }
 
-Mat DrawDetectedCircles(const Mat& image, const vector<Vec3f>& circles,
-    const string& filename)
+Mat DrawDetectedCircles(const Mat& image, const vector<ClassifiedCircle>& circles,
+    const string& filename, size_t candidate_count)
 {
-    Mat annotated = image.clone();
-    for (const Vec3f& ball : circles) {
-        const Point center(cvRound(ball[0]), cvRound(ball[1]));
-        circle(annotated, center, cvRound(ball[2]), Scalar(0, 255, 0), 2);
-        circle(annotated, center, 2, Scalar(0, 0, 255), FILLED);
-    }
     const double scale = min({1.0, 1100.0 / image.cols, 650.0 / image.rows});
     Mat preview;
-    resize(annotated, preview, Size(cvRound(image.cols * scale), cvRound(image.rows * scale)));
+    resize(image, preview, Size(cvRound(image.cols * scale), cvRound(image.rows * scale)));
+    for (const auto& classified : circles) {
+        const Vec3f& ball = classified.detection.image_circle;
+        const Point center(cvRound(ball[0] * scale), cvRound(ball[1] * scale));
+        circle(preview, center, cvRound(ball[2] * scale), Scalar(0, 255, 0), 2);
+        circle(preview, center, 2, Scalar(0, 0, 255), FILLED);
+        const Point text = center + Point(-8, -cvRound(ball[2] * scale) - 4);
+        putText(preview, classified.label, text, FONT_HERSHEY_SIMPLEX,
+            0.5, Scalar(0, 0, 0), 3, LINE_AA);
+        putText(preview, classified.label, text, FONT_HERSHEY_SIMPLEX,
+            0.5, Scalar(255, 255, 255), 1, LINE_AA);
+    }
     copyMakeBorder(preview, preview, 60, 0, 0, 0, BORDER_CONSTANT, Scalar(30, 30, 30));
-    putText(preview, filename + " - " + to_string(circles.size()) + " circles",
-        Point(12, 23), FONT_HERSHEY_SIMPLEX, 0.6, Scalar(255, 255, 255), 1, LINE_AA);
+    putText(preview, filename + " - " + to_string(circles.size()) + " retained / "
+        + to_string(candidate_count) + " candidates", Point(12, 23),
+        FONT_HERSHEY_SIMPLEX, 0.6, Scalar(255, 255, 255), 1, LINE_AA);
     putText(preview, "Press any key for next image; Esc stops evaluation.",
         Point(12, 47), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(255, 255, 255), 1, LINE_AA);
     return preview;
@@ -439,10 +612,19 @@ Mat DrawDetectedCircles(const Mat& image, const vector<Vec3f>& circles,
 
 void RunEvaluation(bool visualize = true)
 {
-    cout << "\nHough detection + dummy White classification: Table1-6; AllBalls excluded as training data.\n"
+    cout << "\nHough detection + HLS minimum-cost classification: Table1-6; AllBalls excluded as training data.\n"
          << "Transformed image: 1434x683. Match distance <= " << MATCH_DISTANCE
          << " pixels (half of the 21.5-pixel ball radius).\n"
          << "Ground truth is provisional; invalid coordinates are excluded, not corrected.\n";
+    const Mat all_balls = imread("Media/Pool/AllBalls.jpeg");
+    vector<HistogramReference> references;
+    try {
+        references = BuildReferenceHistograms(all_balls, labeled_circles);
+    } catch (const std::exception& error) {
+        cerr << "Cannot build reference histograms: " << error.what() << '\n';
+        return;
+    }
+    cout << "Precomputed " << references.size() << " circular HLS references (balls/net/table).\n";
     EvaluationResult total;
     size_t excluded = 0, evaluated_images = 0;
     vector<ImageEvaluation> image_results;
@@ -469,20 +651,19 @@ void RunEvaluation(bool visualize = true)
             truth.push_back({center, BallClassName(i)});
         }
         const vector<DetectedCircle> detections = Detector(source);
-        vector<Vec3f> circles;
+        const vector<ClassifiedCircle> circles = Classifier(source, detections, references);
+        cout << supplied.filename << ": " << detections.size() << " candidates -> "
+             << circles.size() << " retained after Classifier\n";
         vector<BallPrediction> predictions;
-        for (const DetectedCircle& detection : detections) {
-            circles.push_back(detection.image_circle);
-            predictions.push_back({detection.table_center,
-                Classifier(source, detection.image_circle)});
-        }
+        for (const auto& circle : circles)
+            predictions.push_back({circle.detection.table_center, circle.label});
         const EvaluationResult result = Evaluation(predictions, truth);
         PrintEvaluation(supplied.filename, result);
         image_results.push_back({supplied.filename, result, excluded - excluded_before});
         AddEvaluation(total, result);
         ++evaluated_images;
         if (visualize) {
-            imshow("Test image circle detection", DrawDetectedCircles(source, circles, supplied.filename));
+            imshow("Test image circle detection", DrawDetectedCircles(source, circles, supplied.filename, detections.size()));
             if (waitKey(0) == 27)
                 break;
         }
