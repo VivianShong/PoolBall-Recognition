@@ -62,11 +62,23 @@ struct BallPrediction {
     string label;
 };
 
-// Deliberately simple baseline: one circle at the transformed image origin.
-// TODO: replace with our logic
-vector<Vec3f> Detector(const Mat&)
+// Same grayscale conversion, Hough settings and table filter as AllBalls.
+// Circle coordinates and radii are in the original camera image.
+vector<Vec3f> HoughDetector(const Mat& image)
 {
-    return {Vec3f(0, 0, BALL_RADIUS)};
+    Mat grey;
+    cvtColor(image, grey, COLOR_BGR2GRAY);
+    vector<Vec3f> circles;
+    HoughCircles(grey, circles, HOUGH_GRADIENT, 1.0, 21.5,
+        100.0, 20.0, 10, 23);
+    const vector<Point2f> table_border = {
+        TABLE_TOP_LEFT, TABLE_TOP_RIGHT, TABLE_BOTTOM_RIGHT, TABLE_BOTTOM_LEFT
+    };
+    circles.erase(remove_if(circles.begin(), circles.end(),
+        [&table_border](const Vec3f& ball) {
+            return pointPolygonTest(table_border, Point2f(ball[0], ball[1]), false) < 0;
+        }), circles.end());
+    return circles;
 }
 // TODO: replace with our logic
 string Classifier(const Mat&, const Vec3f&)
@@ -83,6 +95,26 @@ Mat TablePerspectiveTransform()
         Point2f(0, 0), Point2f(1433, 0), Point2f(1433, 682), Point2f(0, 682)
     };
     return getPerspectiveTransform(camera, table);
+}
+
+struct DetectedCircle {
+    Vec3f image_circle; // Original-image x, y, radius for histograms and drawing.
+    Point2f table_center; // Perspective-transformed center for evaluation.
+};
+
+// Detection owns the coordinate conversion; evaluation receives table coordinates.
+vector<DetectedCircle> Detector(const Mat& image)
+{
+    const vector<Vec3f> circles = HoughDetector(image);
+    vector<Point2f> centers, transformed_centers;
+    for (const Vec3f& circle : circles)
+        centers.emplace_back(circle[0], circle[1]);
+    if (!centers.empty())
+        perspectiveTransform(centers, transformed_centers, TablePerspectiveTransform());
+    vector<DetectedCircle> detections;
+    for (size_t i = 0; i < circles.size(); ++i)
+        detections.push_back({circles[i], transformed_centers[i]});
+    return detections;
 }
 
 string BallClassName(int index)
@@ -381,9 +413,29 @@ void WriteEvaluationCsv(const vector<ImageEvaluation>& images,
     }
 }
 
-void RunEvaluation()
+Mat DrawDetectedCircles(const Mat& image, const vector<Vec3f>& circles,
+    const string& filename)
 {
-    cout << "\nEvaluation: Table1-6; AllBalls excluded as training data.\n"
+    Mat annotated = image.clone();
+    for (const Vec3f& ball : circles) {
+        const Point center(cvRound(ball[0]), cvRound(ball[1]));
+        circle(annotated, center, cvRound(ball[2]), Scalar(0, 255, 0), 2);
+        circle(annotated, center, 2, Scalar(0, 0, 255), FILLED);
+    }
+    const double scale = min({1.0, 1100.0 / image.cols, 650.0 / image.rows});
+    Mat preview;
+    resize(annotated, preview, Size(cvRound(image.cols * scale), cvRound(image.rows * scale)));
+    copyMakeBorder(preview, preview, 60, 0, 0, 0, BORDER_CONSTANT, Scalar(30, 30, 30));
+    putText(preview, filename + " - " + to_string(circles.size()) + " circles",
+        Point(12, 23), FONT_HERSHEY_SIMPLEX, 0.6, Scalar(255, 255, 255), 1, LINE_AA);
+    putText(preview, "Press any key for next image; Esc stops evaluation.",
+        Point(12, 47), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(255, 255, 255), 1, LINE_AA);
+    return preview;
+}
+
+void RunEvaluation(bool visualize = true)
+{
+    cout << "\nHough detection + dummy White classification: Table1-6; AllBalls excluded as training data.\n"
          << "Transformed image: 1434x683. Match distance <= " << MATCH_DISTANCE
          << " pixels (half of the 21.5-pixel ball radius).\n"
          << "Ground truth is provisional; invalid coordinates are excluded, not corrected.\n";
@@ -391,22 +443,19 @@ void RunEvaluation()
     size_t excluded = 0, evaluated_images = 0;
     vector<ImageEvaluation> image_results;
     vector<ExcludedGroundTruth> exclusions;
-    const Mat transform = TablePerspectiveTransform();
     for (const auto& supplied : SuppliedGroundTruth()) {
         const Mat source = imread(string("Media/Pool/") + supplied.filename);
         if (source.empty()) {
             cerr << "Cannot evaluate missing image: " << supplied.filename << '\n';
             continue;
         }
-        Mat transformed;
-        warpPerspective(source, transformed, transform, TRANSFORMED_TABLE_SIZE);
         const size_t excluded_before = excluded;
         vector<BallPrediction> truth;
         for (int i = 0; i < BALL_CLASSES; ++i) {
             const Point2f center = supplied.centers[i];
             if (center == Point2f(-1, -1)) continue;
             if (!isfinite(center.x) || !isfinite(center.y) || center.x < 0 || center.y < 0
-                || center.x >= transformed.cols || center.y >= transformed.rows) {
+                || center.x >= TRANSFORMED_TABLE_SIZE.width || center.y >= TRANSFORMED_TABLE_SIZE.height) {
                 ++excluded;
                 exclusions.push_back({supplied.filename, BallClassName(i), center});
                 cerr << "Excluded ground truth: " << supplied.filename << ", ball "
@@ -415,16 +464,27 @@ void RunEvaluation()
             }
             truth.push_back({center, BallClassName(i)});
         }
+        const vector<DetectedCircle> detections = Detector(source);
+        vector<Vec3f> circles;
         vector<BallPrediction> predictions;
-        for (const Vec3f& circle :Detector(transformed))
-            predictions.push_back({Point2f(circle[0], circle[1]),
-            Classifier(transformed, circle)});
+        for (const DetectedCircle& detection : detections) {
+            circles.push_back(detection.image_circle);
+            predictions.push_back({detection.table_center,
+                Classifier(source, detection.image_circle)});
+        }
         const EvaluationResult result = Evaluation(predictions, truth);
         PrintEvaluation(supplied.filename, result);
         image_results.push_back({supplied.filename, result, excluded - excluded_before});
         AddEvaluation(total, result);
         ++evaluated_images;
+        if (visualize) {
+            imshow("Test image circle detection", DrawDetectedCircles(source, circles, supplied.filename));
+            if (waitKey(0) == 27)
+                break;
+        }
     }
+    if (visualize && evaluated_images > 0)
+        destroyWindow("Test image circle detection");
     PrintEvaluation("Pooled total", total);
     cout << "Evaluated images: " << evaluated_images << "/6; excluded GT entries: " << excluded << '\n';
     cout << "\nConfusion matrix: rows=ground truth, columns=prediction.\n"
@@ -584,7 +644,7 @@ void LabelCircles(const Mat& image, const vector<Vec3f>& circles)
 
 void MyApplication(bool label_mode)
 {
-    
+
 	char* file_location = "Media/Pool/";
 	char* pool_files[] = {
 		"AllBalls.jpeg",
@@ -618,22 +678,8 @@ void MyApplication(bool label_mode)
 	// Find circles in the sample image to allow manual labeling
 	if (!pool_image[0].empty())
 	{
-		Mat grey;
-		cvtColor(pool_image[0], grey, COLOR_BGR2GRAY);
-
-		vector<Vec3f> circles;
-		HoughCircles(grey, circles, HOUGH_GRADIENT, 1.0, 21.5,
-			100.0, 20.0, 10, 23);
-
-		Mat detected_balls = pool_image[0].clone();
-		const vector<Point2f> table_border = {
-			TABLE_TOP_LEFT, TABLE_TOP_RIGHT, TABLE_BOTTOM_RIGHT, TABLE_BOTTOM_LEFT
-		};
-		// Keep centers inside the table or exactly on its border.
-		circles.erase(remove_if(circles.begin(), circles.end(),
-			[&table_border](const Vec3f& ball) {
-				return pointPolygonTest(table_border, Point2f(ball[0], ball[1]), false) < 0;
-			}), circles.end());
+        const vector<Vec3f> circles = HoughDetector(pool_image[0]);
+        Mat detected_balls = pool_image[0].clone();
 
 		int count = 0;
 		for (const Vec3f& ball : circles)
