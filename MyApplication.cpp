@@ -1,7 +1,9 @@
 ﻿
 #include "Utilities.h"
 
-
+/*The cushion to cushion size of the table is 1434mm by 683mm and 
+so the transformed table image has been set as 683 rows by 1434 columns.  
+Each ball is 43mm in diameter.*/
 void MyApplication()
 {
 	char* file_location = "Media/Pool/";
@@ -33,6 +35,26 @@ void MyApplication()
 		imshow(pool_files[file_no], pool_image[file_no]);
 
 		char pause = cv::waitKey();  // This introduces a delay between frame.  The length of the delay/number can be reduced.
+	}
+
+	if (!pool_image[0].empty())
+	{
+		Mat grey;
+		cvtColor(pool_image[0], grey, COLOR_BGR2GRAY);
+
+		vector<Vec3f> circles;
+		HoughCircles(grey, circles, HOUGH_GRADIENT, 1.0, 43.0,
+			100.0, 20.0, 20, 23);
+
+		Mat detected_balls = pool_image[0].clone();
+		for (const Vec3f& ball : circles)
+		{
+			Point centre(cvRound(ball[0]), cvRound(ball[1]));
+			circle(detected_balls, centre, cvRound(ball[2]), Scalar(0, 255, 0), 2);
+			circle(detected_balls, centre, 2, Scalar(0, 0, 255), FILLED);
+		}
+		imshow("AllBalls circle detection", detected_balls);
+		waitKey();
 	}
 
 }
