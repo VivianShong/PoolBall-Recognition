@@ -70,7 +70,7 @@ vector<Vec3f> HoughDetector(const Mat& image)
     cvtColor(image, grey, COLOR_BGR2GRAY);
     vector<Vec3f> circles;
     HoughCircles(grey, circles, HOUGH_GRADIENT, 1.0, 21.5,
-        100.0, 20.0, 10, 23);
+        100.0, 12.0, 19, 25);
     const vector<Point2f> table_border = {
         TABLE_TOP_LEFT, TABLE_TOP_RIGHT, TABLE_BOTTOM_RIGHT, TABLE_BOTTOM_LEFT
     };
