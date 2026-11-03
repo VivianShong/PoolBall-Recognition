@@ -602,25 +602,37 @@ vector<Point> GroundTruthOutline(const BallPrediction& truth, const Mat& inverse
 
 void DrawOverlayLabel(Mat& image, const string& label, Point position, Scalar colour)
 {
-    position.x = max(2, min(position.x, image.cols - 80));
-    position.y = max(15, min(position.y, image.rows - 4));
+    int baseline = 0;
+    constexpr double font_scale = 0.46;
+    const Size text_size = getTextSize(label, FONT_HERSHEY_SIMPLEX, font_scale, 1, &baseline);
+    position.x = max(2, min(position.x - text_size.width / 2, image.cols - text_size.width - 2));
+    position.y = max(text_size.height + 2, min(position.y + text_size.height / 2, image.rows - baseline - 2));
     putText(image, label, position, FONT_HERSHEY_SIMPLEX,
-        0.38, Scalar(0, 0, 0), 3, LINE_AA);
+        font_scale, Scalar(0, 0, 0), 2, LINE_AA);
     putText(image, label, position, FONT_HERSHEY_SIMPLEX,
-        0.38, colour, 1, LINE_AA);
+        font_scale, colour, 1, LINE_AA);
 }
 
 Mat DrawDetectedCircles(const Mat& image, const vector<ClassifiedCircle>& circles,
-    const string& filename, size_t candidate_count)
+    const string& filename, size_t candidate_count, bool perspective_view = false)
 {
-    const double scale = min({1.0, 1100.0 / image.cols, 650.0 / image.rows});
+    Mat background = image;
+    if (perspective_view) warpPerspective(image, background, TablePerspectiveTransform(), TRANSFORMED_TABLE_SIZE);
+    const double scale = min({1.0, 1100.0 / background.cols, 650.0 / background.rows});
     Mat preview;
-    resize(image, preview, Size(cvRound(image.cols * scale), cvRound(image.rows * scale)));
+    resize(background, preview, Size(cvRound(background.cols * scale), cvRound(background.rows * scale)));
     for (const auto& classified : circles) {
         const Vec3f& ball = classified.detection.image_circle;
-        const Point center(cvRound(ball[0] * scale), cvRound(ball[1] * scale));
-        circle(preview, center, cvRound(ball[2] * scale), Scalar(0, 255, 0), 1, LINE_AA);
-        DrawOverlayLabel(preview, classified.label + " ", center + Point(-7, 5),
+        const Point2f c = perspective_view ? classified.detection.table_center : Point2f(ball[0], ball[1]);
+        const Point center(cvRound(c.x * scale), cvRound(c.y * scale));
+        circle(preview, center, cvRound((perspective_view ? BALL_RADIUS : ball[2]) * scale), Scalar(0, 255, 0), 1, LINE_AA);
+    }
+    // Render every label after every circle so overlaps cannot cover text.
+    for (const auto& classified : circles) {
+        const Vec3f& ball = classified.detection.image_circle;
+        const Point2f c = perspective_view ? classified.detection.table_center : Point2f(ball[0], ball[1]);
+        const Point center(cvRound(c.x * scale), cvRound(c.y * scale));
+        DrawOverlayLabel(preview, classified.label, center,
             Scalar(255, 255, 255));
     }
     copyMakeBorder(preview, preview, 60, 0, 0, 0, BORDER_CONSTANT, Scalar(30, 30, 30));
@@ -633,22 +645,37 @@ Mat DrawDetectedCircles(const Mat& image, const vector<ClassifiedCircle>& circle
 }
 
 Mat DrawGroundTruthCircles(const Mat& image, const vector<BallPrediction>& truth,
-    const string& filename)
+    const string& filename, bool perspective_view = false)
 {
-    const double scale = min({1.0, 1100.0 / image.cols, 650.0 / image.rows});
+    Mat background = image;
+    if (perspective_view) warpPerspective(image, background, TablePerspectiveTransform(), TRANSFORMED_TABLE_SIZE);
+    const double scale = min({1.0, 1100.0 / background.cols, 650.0 / background.rows});
     Mat preview;
-    resize(image, preview, Size(cvRound(image.cols * scale), cvRound(image.rows * scale)));
+    resize(background, preview, Size(cvRound(background.cols * scale), cvRound(background.rows * scale)));
     const Mat inverse = TablePerspectiveTransform().inv();
     for (const auto& actual : truth) {
-        const vector<Point> circle_outline =
-            GroundTruthOutline(actual, inverse, scale, BALL_RADIUS + 3.0);
-        const vector<vector<Point>> outline{circle_outline};
-        polylines(preview, outline, true, Scalar(255, 255, 0), 1, LINE_AA);
-        vector<Point2f> camera_center;
-        perspectiveTransform(vector<Point2f>{actual.center}, camera_center, inverse);
-        const Point center(cvRound(camera_center[0].x * scale), cvRound(camera_center[0].y * scale));
-        DrawOverlayLabel(preview, actual.label + " ", center + Point(-7, 5),
-            Scalar(255, 255, 255));
+        Point center;
+        if (perspective_view) {
+            center = Point(cvRound(actual.center.x * scale), cvRound(actual.center.y * scale));
+            circle(preview, center, cvRound((BALL_RADIUS + 3.0) * scale), Scalar(255, 255, 0), 1, LINE_AA);
+        } else {
+            const vector<Point> circle_outline = GroundTruthOutline(actual, inverse, scale, BALL_RADIUS + 3.0);
+            polylines(preview, vector<vector<Point>>{circle_outline}, true, Scalar(255, 255, 0), 1, LINE_AA);
+            vector<Point2f> camera_center;
+            perspectiveTransform(vector<Point2f>{actual.center}, camera_center, inverse);
+            center = Point(cvRound(camera_center[0].x * scale), cvRound(camera_center[0].y * scale));
+        }
+    }
+    // Render every label last so neighboring outlines cannot cross the text.
+    for (const auto& actual : truth) {
+        Point center;
+        if (perspective_view) center = Point(cvRound(actual.center.x * scale), cvRound(actual.center.y * scale));
+        else {
+            vector<Point2f> camera_center;
+            perspectiveTransform(vector<Point2f>{actual.center}, camera_center, inverse);
+            center = Point(cvRound(camera_center[0].x * scale), cvRound(camera_center[0].y * scale));
+        }
+        DrawOverlayLabel(preview, actual.label, center, Scalar(255, 255, 255));
     }
     copyMakeBorder(preview, preview, 60, 0, 0, 0, BORDER_CONSTANT, Scalar(30, 30, 30));
     putText(preview, filename + " - " + to_string(truth.size()) + " valid supplied centers",
@@ -659,7 +686,7 @@ Mat DrawGroundTruthCircles(const Mat& image, const vector<BallPrediction>& truth
 }
 
 Mat DrawDetectionOutcomes(const Mat& image, const vector<ClassifiedCircle>& circles,
-    const vector<BallPrediction>& truth, const string& filename)
+    const vector<BallPrediction>& truth, const string& filename, bool perspective_view = false)
 {
     vector<BallPrediction> predictions;
     for (const auto& circle : circles)
@@ -669,47 +696,85 @@ Mat DrawDetectionOutcomes(const Mat& image, const vector<ClassifiedCircle>& circ
     vector<int> prediction_truth(circles.size(), -1);
     for (size_t i = 0; i < matches.size(); ++i)
         if (matches[i] >= 0) prediction_truth[matches[i]] = static_cast<int>(i);
-    const double scale = min({1.0, 1100.0 / image.cols, 650.0 / image.rows});
-    Mat preview;
-    resize(image, preview, Size(cvRound(image.cols * scale), cvRound(image.rows * scale)));
+    Mat background = image;
+    if (perspective_view) warpPerspective(image, background, TablePerspectiveTransform(), TRANSFORMED_TABLE_SIZE);
+    const double scale = min({1.0, 1100.0 / background.cols, 650.0 / background.rows});
+    Mat chart;
+    resize(background, chart, Size(cvRound(background.cols * scale), cvRound(background.rows * scale)));
     const Mat inverse = TablePerspectiveTransform().inv();
     for (size_t i = 0; i < truth.size(); ++i) {
         if (matches[i] >= 0) continue;
-        const vector<vector<Point>> outline{GroundTruthOutline(truth[i], inverse, scale)};
-        polylines(preview, outline, true, Scalar(255, 0, 255), 1, LINE_AA);
-        vector<Point2f> center;
-        perspectiveTransform(vector<Point2f>{truth[i].center}, center, inverse);
-        DrawOverlayLabel(preview, "GT:" + truth[i].label,
-            Point(cvRound(center[0].x * scale) - 8, cvRound(center[0].y * scale) + 22),
-            Scalar(255, 0, 255));
+        if (perspective_view) {
+            circle(chart, Point(cvRound(truth[i].center.x * scale), cvRound(truth[i].center.y * scale)),
+                cvRound(BALL_RADIUS * scale), Scalar(255, 0, 255), 1, LINE_AA);
+        } else polylines(chart, vector<vector<Point>>{GroundTruthOutline(truth[i], inverse, scale)},
+            true, Scalar(255, 0, 255), 1, LINE_AA);
     }
     for (size_t i = 0; i < circles.size(); ++i) {
         const Vec3f& ball = circles[i].detection.image_circle;
-        const Point center(cvRound(ball[0] * scale), cvRound(ball[1] * scale));
+        const Point2f c = perspective_view ? circles[i].detection.table_center : Point2f(ball[0], ball[1]);
+        const Point center(cvRound(c.x * scale), cvRound(c.y * scale));
         const int actual = prediction_truth[i];
-        const Scalar colour = actual < 0 ? Scalar(0, 0, 255) : Scalar(0, 255, 0);
-        circle(preview, center, cvRound(ball[2] * scale), colour, 1, LINE_AA);
-        string label = circles[i].label;
-        if (actual >= 0 && label != truth[actual].label)
-            label = "P:" + label + "/GT:" + truth[actual].label;
-        DrawOverlayLabel(preview, label,
-            center + Point(-8, -cvRound(ball[2] * scale) - 5), colour);
+        const bool label_ok = actual >= 0 && circles[i].label == truth[actual].label;
+        const Scalar colour = actual < 0 ? Scalar(0, 0, 255) : (label_ok ? Scalar(0, 190, 0) : Scalar(0, 165, 255));
+        circle(chart, center, cvRound((perspective_view ? BALL_RADIUS : ball[2]) * scale), colour, 1, LINE_AA);
     }
-    copyMakeBorder(preview, preview, 105, 0, 0, 0, BORDER_CONSTANT, Scalar(30, 30, 30));
-    putText(preview, filename + " - TP: " + to_string(result.tp) + "  FP: "
-        + to_string(result.fp) + "  FN: " + to_string(result.fn), Point(12, 24),
-        FONT_HERSHEY_SIMPLEX, 0.6, Scalar(255, 255, 255), 1, LINE_AA);
-    putText(preview, "Green: matched center (TP). Red: unmatched prediction (FP). Magenta: missed GT (FN).",
-        Point(12, 49), FONT_HERSHEY_SIMPLEX, 0.45, Scalar(220, 220, 220), 1, LINE_AA);
-    putText(preview, "Correct labels: " + to_string(result.correct_labels) + "/" + to_string(result.tp)
-        + " matched. P/GT marks label errors; these still count as detection TP.",
-        Point(12, 72), FONT_HERSHEY_SIMPLEX, 0.45, Scalar(220, 220, 220), 1, LINE_AA);
-    putText(preview, "Relative to provisional supplied GT. Any key: next image; Esc: stop.",
-        Point(12, 96), FONT_HERSHEY_SIMPLEX, 0.48, Scalar(220, 220, 220), 1, LINE_AA);
-    return preview;
+    const int panel_h = 250, report_width = max(chart.cols, 1434), panel_w = (report_width - 32) / 2;
+    Mat report(chart.rows + panel_h, report_width, CV_8UC3, Scalar(248, 248, 248));
+    chart.copyTo(report(Rect(0, 0, chart.cols, chart.rows)));
+    putText(report, filename + "   |   TP " + to_string(result.tp) + "   FP " + to_string(result.fp) + "   FN " + to_string(result.fn),
+        Point(12, chart.rows + 24), FONT_HERSHEY_SIMPLEX, 0.55, Scalar(35, 35, 35), 1, LINE_AA);
+    const int left_x = 12, right_x = panel_w + 10, y0 = chart.rows + 48;
+    putText(report, "BALL CROPS", Point(left_x, y0), FONT_HERSHEY_SIMPLEX, 0.46, Scalar(40, 40, 40), 1, LINE_AA);
+    putText(report, "POSITION / CLASSIFICATION (center distance after perspective projection, px)", Point(right_x, y0), FONT_HERSHEY_SIMPLEX, 0.34, Scalar(40, 40, 40), 1, LINE_AA);
+    const int thumb_w = 48, thumb_h = 48, cols = max(1, (panel_w - 24) / 76);
+    for (size_t i = 0; i < circles.size() && i < static_cast<size_t>(cols * 3); ++i) {
+        const Vec3f& b = circles[i].detection.image_circle;
+        const int x = cvRound(b[0]), y = cvRound(b[1]), r = max(2, cvRound(b[2]));
+        const Rect roi(max(0, x-r), max(0, y-r), min(2*r+1, image.cols-max(0,x-r)), min(2*r+1, image.rows-max(0,y-r)));
+        if (roi.width <= 0 || roi.height <= 0) continue;
+        Mat crop, thumb;
+        resize(image(roi), thumb, Size(thumb_w, thumb_h));
+        const int tx = left_x + 76 * static_cast<int>(i % cols), ty = y0 + 10 + 68 * static_cast<int>(i / cols);
+        thumb.copyTo(report(Rect(tx, ty, thumb_w, thumb_h)));
+        putText(report, circles[i].label, Point(tx, ty + 64), FONT_HERSHEY_SIMPLEX, 0.36, Scalar(30,30,30), 1, LINE_AA);
+    }
+    int row = 0;
+    for (size_t i = 0; i < circles.size() && row < 7; ++i) {
+        const int actual = prediction_truth[i];
+        string line = circles[i].label + ": ";
+        Scalar ink(35, 35, 35);
+        if (actual < 0) {
+            ink = Scalar(0,0,200);
+            line = "FP | ground truth: — | classified: " + circles[i].label;
+            if (truth.empty()) line += " | center distance: n/a";
+            else {
+                size_t nearest = 0;
+                for (size_t t = 1; t < truth.size(); ++t)
+                    if (norm(circles[i].detection.table_center - truth[t].center)
+                        < norm(circles[i].detection.table_center - truth[nearest].center)) nearest = t;
+                line += " | center distance: " + format("%.1f",
+                    norm(circles[i].detection.table_center - truth[nearest].center));
+            }
+        }
+        else {
+            const Point2f d = circles[i].detection.table_center - truth[actual].center;
+            const double distance = norm(d);
+            const bool label_ok = circles[i].label == truth[actual].label;
+            line = string(label_ok ? "POSITION OK" : "POSITION OK, LABEL ERROR")
+                + " | ground truth: " + truth[actual].label + " | classified: " + circles[i].label
+                + " | center distance: " + format("%.1f", distance);
+            ink = label_ok ? Scalar(0,130,0) : Scalar(0,130,220);
+        }
+        putText(report, line, Point(right_x, y0 + 23 + row++ * 23), FONT_HERSHEY_SIMPLEX, 0.34, ink, 1, LINE_AA);
+    }
+    putText(report, "Circle colors: green correct label, orange label error, red FP, magenta FN.",
+        Point(12, report.rows - 10), FONT_HERSHEY_SIMPLEX, 0.38, Scalar(65,65,65), 1, LINE_AA);
+    return report;
 }
 
-void SaveEvaluationViews(const string& filename, const Mat& ground_truth, const Mat& labels, const Mat& outcomes)
+void SaveEvaluationViews(const string& filename, const Mat& ground_truth, const Mat& labels, const Mat& outcomes,
+    const Mat& perspective_ground_truth = Mat(), const Mat& perspective_labels = Mat(), const Mat& perspective_outcomes = Mat())
 {
     try {
         const filesystem::path directory = "output/evaluation/visualizations";
@@ -719,12 +784,23 @@ void SaveEvaluationViews(const string& filename, const Mat& ground_truth, const 
             || !imwrite((directory / (stem + "_labels.png")).string(), labels)
             || !imwrite((directory / (stem + "_outcomes.png")).string(), outcomes))
             cerr << "Could not save visualization for " << filename << '\n';
+        if (!perspective_ground_truth.empty()) {
+            const filesystem::path perspective_directory = directory / "perspective";
+            filesystem::create_directories(perspective_directory);
+            if (!imwrite((perspective_directory / (stem + "_ground_truth_perspective.png")).string(), perspective_ground_truth)
+                || !imwrite((perspective_directory / (stem + "_labels_perspective.png")).string(), perspective_labels)
+                || !imwrite((perspective_directory / (stem + "_outcomes_perspective.png")).string(), perspective_outcomes))
+                cerr << "Could not save perspective views for " << filename << '\n';
+            else
+                cout << "Saved " << filename << " perspective views to "
+                     << filesystem::absolute(perspective_directory).string() << '\n';
+        }
     } catch (const std::exception& error) {
         cerr << "Could not save evaluation views: " << error.what() << '\n';
     }
 }
 
-void RunEvaluation(bool visualize = true)
+void RunEvaluation(bool visualize = true, bool save_perspective = false)
 {
     // MyApplication loads the source images first; clear those windows before
     // starting the per-table evaluation sequence.
@@ -783,7 +859,14 @@ void RunEvaluation(bool visualize = true)
         const Mat ground_truth_view = DrawGroundTruthCircles(source, truth, supplied.filename);
         const Mat labels_view = DrawDetectedCircles(source, circles, supplied.filename, detections.size());
         const Mat outcomes_view = DrawDetectionOutcomes(source, circles, truth, supplied.filename);
-        SaveEvaluationViews(supplied.filename, ground_truth_view, labels_view, outcomes_view);
+        Mat perspective_ground_truth, perspective_labels, perspective_outcomes;
+        if (save_perspective) {
+            perspective_ground_truth = DrawGroundTruthCircles(source, truth, supplied.filename, true);
+            perspective_labels = DrawDetectedCircles(source, circles, supplied.filename, detections.size(), true);
+            perspective_outcomes = DrawDetectionOutcomes(source, circles, truth, supplied.filename, true);
+        }
+        SaveEvaluationViews(supplied.filename, ground_truth_view, labels_view, outcomes_view,
+            perspective_ground_truth, perspective_labels, perspective_outcomes);
         if (visualize) {
             imshow("Pool ball evaluation", labels_view);
             if (waitKey(0) == 27) break;
@@ -791,6 +874,14 @@ void RunEvaluation(bool visualize = true)
             if (waitKey(0) == 27) break;
             imshow("Pool ball evaluation", outcomes_view);
             if (waitKey(0) == 27) break;
+            if (save_perspective) {
+                imshow("Pool ball evaluation", perspective_labels);
+                if (waitKey(0) == 27) break;
+                imshow("Pool ball evaluation", perspective_ground_truth);
+                if (waitKey(0) == 27) break;
+                imshow("Pool ball evaluation", perspective_outcomes);
+                if (waitKey(0) == 27) break;
+            }
         }
     }
     if (visualize && evaluated_images > 0) {
@@ -1131,7 +1222,7 @@ void LabelCircles(const Mat& image, const vector<Vec3f>& circles)
 }
 } // namespace
 
-void MyApplication(bool label_mode)
+void MyApplication(bool label_mode, bool save_perspective)
 {
 
 	char* file_location = "Media/Pool/";
@@ -1184,7 +1275,7 @@ void MyApplication(bool label_mode)
 		if (label_mode)
 			LabelCircles(pool_image[0], circles);
 		else{
-			RunEvaluation();
+			RunEvaluation(true, save_perspective);
 			waitKey();
 		}
 	}
