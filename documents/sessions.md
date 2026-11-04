@@ -15467,28 +15467,4 @@ I’ll make the perspective flag select the displayed views as well as save them
 
 # VScode Codex Plugin prompts
 https://chatgpt.com/s/cx_6aeb440e39548191af535a2b6c663168
-
-
-# Report preparation and session publication (4 November 2026)
-
-This section summarises the subsequent Codex work; it is not a verbatim transcript.
-
-## User request: report draft
-
-Draft a report following documents/report.md, aligned with Instructions.md, using the evaluation images and MyApplication.cpp; add visualisation code if needed.
-
-## Codex assistance
-
-- Inspected the rubric, draft, implementation, evaluation CSVs, annotation audit and outcome figures.
-- Drafted the theory, metric definitions, supplied-annotation results, corrected-annotation comparison, failure analysis and robustness discussion.
-- Added processing-stage image and histogram-marginal exports in MyApplication.cpp.
-- Created documents/build_report.py to produce data-derived figures, editable Markdown and an eight-page PDF with 12-point text and one-inch margins.
-- Built the application, reran both evaluation passes and checked pooled counts, figure links and PDF pagination.
-
-## User request: concise declaration and GitHub session record
-
-Keep the final AI declaration concise and link to sessions.md on https://github.com/VivianShong/PoolBall-Recognition. Push sessions.md; the user will make the repository public later.
-
-## Codex assistance
-
-Shortened the report declaration to link to this file, rebuilt the report and prepared this session record for publication to the existing GitHub repository. Repository visibility is managed by the user.
+https://chatgpt.com/s/cx_6aeb4b9f559c8191a545447a6bc9a318
