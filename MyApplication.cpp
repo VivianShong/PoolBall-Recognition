@@ -57,7 +57,7 @@ namespace {
 
 const Size TRANSFORMED_TABLE_SIZE(1434, 683);
 constexpr float BALL_RADIUS = 21.5f;
-constexpr double MATCH_DISTANCE = BALL_RADIUS / 2.0; // 10.75 transformed pixels.
+constexpr double MATCH_DISTANCE = BALL_RADIUS; // 21.5 transformed pixels.
 constexpr int BALL_CLASSES = 16; // 1-15, White.
 constexpr int BACKGROUND = BALL_CLASSES;
 
@@ -808,7 +808,7 @@ void RunEvaluation(bool visualize = true, bool save_perspective = false)
         destroyAllWindows();
     cout << "\nHough detection + HLS minimum-cost classification: Table1-6; AllBalls excluded as training data.\n"
          << "Transformed image: 1434x683. Match distance <= " << MATCH_DISTANCE
-         << " pixels (half of the 21.5-pixel ball radius).\n"
+         << " pixels (one ball radius).\n"
          << "Ground truth is provisional; invalid coordinates are excluded, not corrected.\n";
     const Mat all_balls = imread("Media/Pool/AllBalls.jpeg");
     vector<HistogramReference> references;
@@ -868,20 +868,15 @@ void RunEvaluation(bool visualize = true, bool save_perspective = false)
         SaveEvaluationViews(supplied.filename, ground_truth_view, labels_view, outcomes_view,
             perspective_ground_truth, perspective_labels, perspective_outcomes);
         if (visualize) {
-            imshow("Pool ball evaluation", labels_view);
+            const Mat& shown_labels = save_perspective ? perspective_labels : labels_view;
+            const Mat& shown_ground_truth = save_perspective ? perspective_ground_truth : ground_truth_view;
+            const Mat& shown_outcomes = save_perspective ? perspective_outcomes : outcomes_view;
+            imshow("Pool ball evaluation", shown_labels);
             if (waitKey(0) == 27) break;
-            imshow("Pool ball evaluation", ground_truth_view);
+            imshow("Pool ball evaluation", shown_ground_truth);
             if (waitKey(0) == 27) break;
-            imshow("Pool ball evaluation", outcomes_view);
+            imshow("Pool ball evaluation", shown_outcomes);
             if (waitKey(0) == 27) break;
-            if (save_perspective) {
-                imshow("Pool ball evaluation", perspective_labels);
-                if (waitKey(0) == 27) break;
-                imshow("Pool ball evaluation", perspective_ground_truth);
-                if (waitKey(0) == 27) break;
-                imshow("Pool ball evaluation", perspective_outcomes);
-                if (waitKey(0) == 27) break;
-            }
         }
     }
     if (visualize && evaluated_images > 0) {
