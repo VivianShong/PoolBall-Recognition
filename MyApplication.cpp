@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <array>
 #include <stdexcept>
+#include <sstream>
 
 /*The cushion to cushion size of the table is 1434mm by 683mm and 
 so the transformed table image has been set as 683 rows by 1434 columns.  
@@ -819,10 +820,10 @@ Mat DrawDetectionOutcomes(const Mat& image, const vector<ClassifiedCircle>& circ
 }
 
 void SaveEvaluationViews(const string& filename, const Mat& ground_truth, const Mat& labels, const Mat& outcomes,
-    const Mat& perspective_ground_truth = Mat(), const Mat& perspective_labels = Mat(), const Mat& perspective_outcomes = Mat())
+    const Mat& perspective_ground_truth = Mat(), const Mat& perspective_labels = Mat(), const Mat& perspective_outcomes = Mat(),
+    const filesystem::path& directory = "output/evaluation/visualizations")
 {
     try {
-        const filesystem::path directory = "output/evaluation/visualizations";
         filesystem::create_directories(directory);
         const string stem = filesystem::path(filename).stem().string();
         if (!imwrite((directory / (stem + "_ground_truth.png")).string(), ground_truth)
@@ -845,12 +846,16 @@ void SaveEvaluationViews(const string& filename, const Mat& ground_truth, const 
     }
 }
 
-void RunEvaluation(bool visualize = true, bool save_perspective = true)
+bool LoadManualGroundTruth(const string& filename, array<Point2f, BALL_CLASSES>& centers);
+
+void RunEvaluationPass(bool visualize, bool save_perspective, bool use_corrected,
+    const filesystem::path& directory)
 {
     // MyApplication loads the source images first; clear those windows before
     // starting the per-table evaluation sequence.
     if (visualize)
         destroyAllWindows();
+    cout << "\n=== " << (use_corrected ? "Corrected ground truth (supplied for unedited tables)" : "Supplied ground truth") << " ===\n";
     cout << "\nHough detection + HLS minimum-cost classification: Table1-6; AllBalls excluded as training data.\n"
          << "Transformed image: 1434x683. Match distance <= " << MATCH_DISTANCE
          << " pixels (one ball radius).\n"
@@ -874,10 +879,18 @@ void RunEvaluation(bool visualize = true, bool save_perspective = true)
             cerr << "Cannot evaluate missing image: " << supplied.filename << '\n';
             continue;
         }
+        auto centers = supplied.centers;
+        try {
+            if (use_corrected && LoadManualGroundTruth(supplied.filename, centers))
+                cout << "Using manual ground truth for " << supplied.filename << '\n';
+        } catch (const exception& error) {
+            cerr << "Cannot evaluate ground truth: " << error.what() << '\n';
+            return;
+        }
         const size_t excluded_before = excluded;
         vector<BallPrediction> truth;
         for (int i = 0; i < BALL_CLASSES; ++i) {
-            const Point2f center = supplied.centers[i];
+            const Point2f center = centers[i];
             if (center == Point2f(-1, -1)) continue;
             if (!isfinite(center.x) || !isfinite(center.y) || center.x < 0 || center.y < 0
                 || center.x >= TRANSFORMED_TABLE_SIZE.width || center.y >= TRANSFORMED_TABLE_SIZE.height) {
@@ -919,7 +932,7 @@ void RunEvaluation(bool visualize = true, bool save_perspective = true)
             perspective_outcomes = DrawDetectionOutcomes(source, circles, truth, supplied.filename, true);
         }
         SaveEvaluationViews(supplied.filename, ground_truth_view, labels_view, outcomes_view,
-            perspective_ground_truth, perspective_labels, perspective_outcomes);
+            perspective_ground_truth, perspective_labels, perspective_outcomes, directory / "visualizations");
         if (visualize) {
             const Mat& shown_labels = save_perspective ? perspective_labels : labels_view;
             const Mat& shown_ground_truth = save_perspective ? perspective_ground_truth : ground_truth_view;
@@ -948,7 +961,28 @@ void RunEvaluation(bool visualize = true, bool save_perspective = true)
         for (int j = 0; j <= BALL_CLASSES; ++j) cout << setw(6) << total.confusion[i][j];
         cout << '\n';
     }
-    WriteEvaluationCsv(image_results, total, exclusions, detector_results, detector_total);
+    WriteEvaluationCsv(image_results, total, exclusions, detector_results, detector_total, directory);
+}
+
+void RunEvaluation(bool visualize = true, bool save_perspective = true)
+{
+    // Always preserve the baseline supplied-truth results. Manual CSVs never replace it.
+    RunEvaluationPass(visualize, save_perspective, false, "output/evaluation");
+    bool corrected = false;
+    for (const auto& supplied : SuppliedGroundTruth()) {
+        auto centers = supplied.centers;
+        try {
+            if (LoadManualGroundTruth(supplied.filename, centers) && centers != supplied.centers)
+                corrected = true;
+        } catch (const exception& error) {
+            cerr << "Cannot load corrected ground truth: " << error.what() << '\n';
+            return;
+        }
+    }
+    if (corrected)
+        RunEvaluationPass(visualize, save_perspective, true, "output/evaluation/corrected");
+    else
+        cout << "No saved ground-truth changes; supplied evaluation is sufficient.\n";
 }
 
 const char* LABEL_WINDOW = "AllBalls circle detection";
@@ -1269,7 +1303,299 @@ void LabelCircles(const Mat& image, const vector<Vec3f>& circles)
     if (getWindowProperty(LABEL_WINDOW, WND_PROP_VISIBLE) >= 1)
         setMouseCallback(LABEL_WINDOW, nullptr, nullptr);
 }
+// CSV coordinates use the same transformed table space as evaluation.
+filesystem::path GroundTruthPath(const string& filename)
+{
+    return filesystem::path("Media/Pool/ground_truth") /
+        (filesystem::path(filename).stem().string() + ".csv");
+}
+
+bool LoadManualGroundTruth(const string& filename, array<Point2f, BALL_CLASSES>& centers)
+{
+    const auto path = GroundTruthPath(filename);
+    if (!filesystem::exists(path)) return false;
+    ifstream file(path);
+    string line;
+    if (!file || !getline(file, line) || line != "label,x,y")
+        throw runtime_error("Invalid ground-truth header: " + path.string());
+    array<Point2f, BALL_CLASSES> loaded;
+    loaded.fill(Point2f(-1, -1));
+    array<bool, BALL_CLASSES> seen{};
+    while (getline(file, line)) {
+        istringstream row(line);
+        string label, x, y, extra;
+        if (!getline(row, label, ',') || !getline(row, x, ',') || !getline(row, y, ',')
+            || getline(row, extra, ','))
+            throw runtime_error("Invalid ground-truth row: " + path.string());
+        const int index = BallClassIndex(label);
+        size_t nx = 0, ny = 0;
+        const Point2f center(stof(x, &nx), stof(y, &ny));
+        if (seen[index] || nx != x.size() || ny != y.size()
+            || !isfinite(center.x) || !isfinite(center.y)
+            || center.x < 0 || center.y < 0 || center.x >= TRANSFORMED_TABLE_SIZE.width
+            || center.y >= TRANSFORMED_TABLE_SIZE.height)
+            throw runtime_error("Invalid or duplicate ground-truth center: " + path.string());
+        seen[index] = true;
+        loaded[index] = center;
+    }
+    if (file.bad()) throw runtime_error("Cannot read " + path.string());
+    centers = loaded;
+    return true;
+}
+
+void SaveManualGroundTruth(const string& filename, const array<Point2f, BALL_CLASSES>& centers)
+{
+    string invalid;
+    for (int i = 0; i < BALL_CLASSES; ++i) {
+        const Point2f point = centers[i];
+        if (point == Point2f(-1, -1)) continue;
+        if (!isfinite(point.x) || !isfinite(point.y) || point.x < 0 || point.y < 0
+            || point.x >= TRANSFORMED_TABLE_SIZE.width || point.y >= TRANSFORMED_TABLE_SIZE.height)
+            invalid += (invalid.empty() ? "" : ", ") + BallClassName(i);
+    }
+    if (!invalid.empty()) throw runtime_error("Correct or delete out-of-bounds balls before saving: " + invalid);
+    const auto path = GroundTruthPath(filename);
+    filesystem::create_directories(path.parent_path());
+    const auto temporary = path.string() + ".tmp";
+    ofstream file(temporary);
+    file.imbue(locale::classic());
+    file << "label,x,y\n" << setprecision(numeric_limits<float>::max_digits10);
+    for (int i = 0; i < BALL_CLASSES; ++i)
+        if (centers[i] != Point2f(-1, -1))
+            file << BallClassName(i) << ',' << centers[i].x << ',' << centers[i].y << '\n';
+    file.close();
+    if (!file) throw runtime_error("Cannot save " + path.string());
+    filesystem::rename(temporary, path);
+}
+
+struct GroundTruthSession {
+    array<Point2f, BALL_CLASSES> centers;
+    Mat transform = TablePerspectiveTransform();
+    double scale = 1;
+    Size image_size;
+    Point2f pending{-1, -1}; // Camera image coordinates.
+    int selected = -1;
+    bool dragging = false;
+    Point2f drag_offset;
+    bool dirty = false;
+    string status = "Drag a circle to move it; click empty space + label key to add.";
+};
+
+void InitializeGroundTruth(GroundTruthSession& session, const GroundTruthImage& supplied)
+{
+    session.centers = supplied.centers;
+    const bool loaded = LoadManualGroundTruth(supplied.filename, session.centers);
+    session.dirty = !loaded;
+}
+
+void GroundTruthClick(int event, int x, int y, int, void* userdata)
+{
+    auto& session = *static_cast<GroundTruthSession*>(userdata);
+    if (event != EVENT_LBUTTONDOWN && event != EVENT_RBUTTONDOWN
+        && event != EVENT_MOUSEMOVE && event != EVENT_LBUTTONUP) return;
+    const Point2f camera(static_cast<float>(x / session.scale), static_cast<float>(y / session.scale));
+    const bool inside = camera.x >= 0 && camera.y >= 0 && camera.x < session.image_size.width
+        && camera.y < session.image_size.height;
+    if (session.dragging && (event == EVENT_MOUSEMOVE || event == EVENT_LBUTTONUP)) {
+        vector<Point2f> transformed;
+        perspectiveTransform(vector<Point2f>{camera + session.drag_offset}, transformed, session.transform);
+        const Point2f point = transformed[0];
+        if (inside && isfinite(point.x) && isfinite(point.y) && point.x >= 0 && point.y >= 0
+            && point.x < TRANSFORMED_TABLE_SIZE.width && point.y < TRANSFORMED_TABLE_SIZE.height
+            && point != session.centers[session.selected]) {
+            session.centers[session.selected] = point;
+            session.dirty = true;
+            session.status = "Moved " + BallClassName(session.selected) + ". Enter saves.";
+        }
+        if (event == EVENT_LBUTTONUP) session.dragging = false;
+        return;
+    }
+    if (!inside || (event != EVENT_LBUTTONDOWN && event != EVENT_RBUTTONDOWN)) return;
+    vector<Point2f> position;
+    int nearest = -1;
+    double distance = BALL_RADIUS;
+    Point2f nearest_camera;
+    for (int i = 0; i < BALL_CLASSES; ++i) {
+        if (session.centers[i] == Point2f(-1, -1)) continue;
+        perspectiveTransform(vector<Point2f>{session.centers[i]}, position, session.transform.inv());
+        const double candidate = norm(camera - position[0]);
+        if (candidate <= distance) {
+            nearest = i;
+            distance = candidate;
+            nearest_camera = position[0];
+        }
+    }
+    session.pending = Point2f(-1, -1);
+    session.selected = nearest;
+    session.dragging = false;
+    if (event == EVENT_RBUTTONDOWN) {
+        if (nearest >= 0) {
+            session.centers[nearest] = Point2f(-1, -1);
+            session.selected = -1;
+            session.dirty = true;
+            session.status = "Removed " + BallClassName(nearest) + ".";
+        }
+    } else if (nearest >= 0) {
+        session.dragging = true;
+        session.drag_offset = nearest_camera - camera;
+        session.status = "Selected " + BallClassName(nearest) + ". Drag, press a label key, or Backspace to delete.";
+    } else {
+        vector<Point2f> transformed;
+        perspectiveTransform(vector<Point2f>{camera}, transformed, session.transform);
+        const Point2f point = transformed[0];
+        if (point.x >= 0 && point.y >= 0 && point.x < TRANSFORMED_TABLE_SIZE.width
+            && point.y < TRANSFORMED_TABLE_SIZE.height) {
+            session.pending = camera;
+            session.status = "Press 1-9, a-f (10-15), or w (White) to add this circle.";
+        } else session.status = "Click inside the table boundary.";
+    }
+}
+
+void ApplyGroundTruthLabel(GroundTruthSession& session, int key)
+{
+    if (key == 8 || key == 127 || key == 65535 || key == 3014656) {
+        session.dragging = false;
+        if (session.pending != Point2f(-1, -1)) {
+            session.pending = Point2f(-1, -1);
+            session.status = "Cancelled pending circle.";
+        } else if (session.selected >= 0) {
+            session.centers[session.selected] = Point2f(-1, -1);
+            session.selected = -1;
+            session.dirty = true;
+            session.status = "Deleted selected circle.";
+        }
+        return;
+    }
+    if (key == '[' || key == ']') {
+        session.dragging = false;
+        session.pending = Point2f(-1, -1);
+        for (int step = 1; step <= BALL_CLASSES; ++step) {
+            const int origin = session.selected < 0 ? (key == ']' ? -1 : 0) : session.selected;
+            const int candidate = (origin + (key == ']' ? step : -step) + 2 * BALL_CLASSES) % BALL_CLASSES;
+            if (session.centers[candidate] != Point2f(-1, -1)) {
+                session.selected = candidate;
+                session.status = "Selected " + BallClassName(candidate) + ". Backspace deletes; label key changes label.";
+                break;
+            }
+        }
+        return;
+    }
+    const string label = LabelForKey(key);
+    if (label.empty() || label == "net") return;
+    const int target = BallClassIndex(label);
+    if (session.pending != Point2f(-1, -1)) {
+        vector<Point2f> transformed;
+        perspectiveTransform(vector<Point2f>{session.pending}, transformed, session.transform);
+        session.centers[target] = transformed[0];
+        session.pending = Point2f(-1, -1);
+        session.selected = target;
+        session.status = "Placed " + label + ". Enter saves.";
+    } else if (session.selected >= 0) {
+        // Each label occurs once. Swapping preserves both circles if the target already exists.
+        swap(session.centers[target], session.centers[session.selected]);
+        session.selected = target;
+        session.status = "Label changed to " + label + ". Existing target labels are swapped.";
+    } else return;
+    session.dragging = false;
+    session.dirty = true;
+}
+
+void EditGroundTruth()
+{
+    const char* window = "Ground truth - click ball centers";
+    size_t image_index = 0;
+    while (image_index < SuppliedGroundTruth().size()) {
+        const string filename = SuppliedGroundTruth()[image_index].filename;
+        const Mat image = imread("Media/Pool/" + filename);
+        if (image.empty()) throw runtime_error("Cannot open " + filename);
+        GroundTruthSession session;
+        InitializeGroundTruth(session, SuppliedGroundTruth()[image_index]);
+        session.scale = min({1.0, 1400.0 / image.cols, 700.0 / image.rows});
+        session.image_size = image.size();
+        const Size display(cvRound(image.cols * session.scale), cvRound(image.rows * session.scale));
+        namedWindow(window, WINDOW_AUTOSIZE);
+        setMouseCallback(window, GroundTruthClick, &session);
+        bool quit = false;
+        int direction = 0;
+        while (!quit && direction == 0) {
+            Mat canvas(display.height + 175, max(display.width, 1100), CV_8UC3, Scalar(240, 240, 240));
+            Mat preview = canvas(Rect(0, 0, display.width, display.height));
+            resize(image, preview, display);
+            string invalid;
+            for (int i = 0; i < BALL_CLASSES; ++i) {
+                if (session.centers[i] == Point2f(-1, -1)) continue;
+                const Point2f table = session.centers[i];
+                if (table.x < 0 || table.y < 0 || table.x >= TRANSFORMED_TABLE_SIZE.width
+                    || table.y >= TRANSFORMED_TABLE_SIZE.height)
+                    invalid += (invalid.empty() ? "" : ", ") + BallClassName(i);
+                vector<Point2f> camera;
+                perspectiveTransform(vector<Point2f>{session.centers[i]}, camera, session.transform.inv());
+                const Point center(cvRound(camera[0].x * session.scale), cvRound(camera[0].y * session.scale));
+                circle(preview, center, max(1, cvRound(BALL_RADIUS * session.scale)),
+                    i == session.selected ? Scalar(0, 255, 255) : Scalar(255, 255, 0),
+                    i == session.selected ? 2 : 1, LINE_AA);
+                DrawOverlayLabel(preview, BallClassName(i), center, Scalar(255, 255, 255));
+            }
+            if (session.pending != Point2f(-1, -1)) {
+                const Point center(cvRound(session.pending.x * session.scale), cvRound(session.pending.y * session.scale));
+                circle(preview, center, max(1, cvRound(BALL_RADIUS * session.scale)), Scalar(0, 255, 255), 2, LINE_AA);
+                drawMarker(preview, center, Scalar(0, 255, 255), MARKER_CROSS, 7, 1);
+            }
+            const vector<string> lines = {
+                filename + " (" + to_string(image_index + 1) + "/6) | " + session.status,
+                "1-9: balls 1-9   a-f: balls 10-15   w: White   Right-click: remove ball",
+                "Enter: save   Space: save + next   P: save + previous   Esc: save + exit",
+                "Drag: move   Label key: relabel selected (swap if occupied)   Backspace/Delete: remove/cancel",
+                "[ / ]: select previous/next circle, including out-of-bounds circles   Radius: 21.5 image pixels",
+                invalid.empty() ? "All centers are inside the table." : "Outside table: " + invalid + ". Click + original label to fix, or select + delete."
+            };
+            for (size_t i = 0; i < lines.size(); ++i)
+                putText(canvas, lines[i], Point(12, display.height + 23 + 27 * i),
+                    FONT_HERSHEY_SIMPLEX, 0.48, Scalar(30, 30, 30), 1, LINE_AA);
+            imshow(window, canvas);
+            const int key = waitKey(30);
+            const bool closed = getWindowProperty(window, WND_PROP_VISIBLE) < 1;
+            ApplyGroundTruthLabel(session, key);
+            if (key == 10 || key == 13 || key == ' ' || key == 'p' || key == 'P' || key == 27 || closed) {
+                if (session.pending != Point2f(-1, -1) && !closed) {
+                    session.status = "Label the pending circle first, or Backspace to cancel it.";
+                    continue;
+                }
+                try {
+                    session.dragging = false;
+                    if (session.dirty) SaveManualGroundTruth(filename, session.centers);
+                    session.dirty = false;
+                    session.status = "Saved " + GroundTruthPath(filename).string();
+                    if (key == ' ') direction = 1;
+                    if ((key == 'p' || key == 'P') && image_index > 0) direction = -1;
+                    quit = key == 27 || closed;
+                } catch (const exception& error) {
+                    if (closed) throw;
+                    session.status = error.what();
+                }
+            }
+        }
+        if (getWindowProperty(window, WND_PROP_VISIBLE) >= 1) {
+            setMouseCallback(window, nullptr, nullptr);
+            destroyWindow(window);
+        }
+        if (quit) return;
+        if (direction < 0) --image_index;
+        else ++image_index;
+    }
+}
 } // namespace
+
+void LabelGroundTruth()
+{
+    try {
+        EditGroundTruth();
+    } catch (const std::exception& error) {
+        std::cerr << "Ground-truth editor: " << error.what() << '\n';
+        cv::destroyAllWindows();
+    }
+}
+
 
 void MyApplication(bool label_mode, bool save_perspective)
 {

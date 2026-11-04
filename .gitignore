@@ -3,3 +3,8 @@
 !/MyApplication.cpp
 !/CMakeLists.txt
 !/BallLabelInput.mm
+!/Media/
+/Media/*
+!/Media/Pool/
+/Media/Pool/*
+!/Media/Pool/ground_truth/
