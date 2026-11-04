@@ -735,57 +735,86 @@ Mat DrawDetectionOutcomes(const Mat& image, const vector<ClassifiedCircle>& circ
         const Scalar colour = actual < 0 ? Scalar(0, 0, 255) : (label_ok ? Scalar(0, 190, 0) : Scalar(0, 165, 255));
         circle(chart, center, cvRound((perspective_view ? BALL_RADIUS : ball[2]) * scale), colour, 1, LINE_AA);
     }
-    const int panel_h = 250, report_width = max(chart.cols, 1434), panel_w = (report_width - 32) / 2;
-    Mat report(chart.rows + panel_h, report_width, CV_8UC3, Scalar(248, 248, 248));
+    const int card_count = static_cast<int>(circles.size() + result.fn);
+    const int report_width = max(chart.cols, 1434);
+    const int columns = 4, gap = 10, margin = 12, card_height = 132;
+    const int card_width = (report_width - 2 * margin - (columns - 1) * gap) / columns;
+    const int rows = (card_count + columns - 1) / columns;
+    const int panel_height = 64 + rows * (card_height + gap) + 32;
+    Mat report(chart.rows + panel_height, report_width, CV_8UC3, Scalar(248, 248, 248));
     chart.copyTo(report(Rect(0, 0, chart.cols, chart.rows)));
     putText(report, filename + "   |   TP " + to_string(result.tp) + "   FP " + to_string(result.fp) + "   FN " + to_string(result.fn),
         Point(12, chart.rows + 24), FONT_HERSHEY_SIMPLEX, 0.55, Scalar(35, 35, 35), 1, LINE_AA);
-    const int left_x = 12, right_x = panel_w + 10, y0 = chart.rows + 48;
-    putText(report, "BALL CROPS", Point(left_x, y0), FONT_HERSHEY_SIMPLEX, 0.46, Scalar(40, 40, 40), 1, LINE_AA);
-    putText(report, "POSITION / CLASSIFICATION (center distance after perspective projection, px)", Point(right_x, y0), FONT_HERSHEY_SIMPLEX, 0.34, Scalar(40, 40, 40), 1, LINE_AA);
-    const int thumb_w = 48, thumb_h = 48, cols = max(1, (panel_w - 24) / 76);
-    for (size_t i = 0; i < circles.size() && i < static_cast<size_t>(cols * 3); ++i) {
-        const Vec3f& b = circles[i].detection.image_circle;
-        const int x = cvRound(b[0]), y = cvRound(b[1]), r = max(2, cvRound(b[2]));
-        const Rect roi(max(0, x-r), max(0, y-r), min(2*r+1, image.cols-max(0,x-r)), min(2*r+1, image.rows-max(0,y-r)));
-        if (roi.width <= 0 || roi.height <= 0) continue;
-        Mat crop, thumb;
-        resize(image(roi), thumb, Size(thumb_w, thumb_h));
-        const int tx = left_x + 76 * static_cast<int>(i % cols), ty = y0 + 10 + 68 * static_cast<int>(i / cols);
-        thumb.copyTo(report(Rect(tx, ty, thumb_w, thumb_h)));
-        putText(report, circles[i].label, Point(tx, ty + 64), FONT_HERSHEY_SIMPLEX, 0.36, Scalar(30,30,30), 1, LINE_AA);
-    }
-    int row = 0;
-    for (size_t i = 0; i < circles.size() && row < 7; ++i) {
+    putText(report, "Each crop and caption form one outcome. Distances are in transformed table pixels.",
+        Point(12, chart.rows + 46), FONT_HERSHEY_SIMPLEX, 0.43, Scalar(65, 65, 65), 1, LINE_AA);
+    int card_index = 0;
+    const auto draw_card = [&](const Rect& crop_region, const string& source,
+        const string& outcome, const string& labels, const string& distance, const Scalar& colour) {
+        const int x = margin + (card_index % columns) * (card_width + gap);
+        const int y = chart.rows + 64 + (card_index / columns) * (card_height + gap);
+        ++card_index;
+        rectangle(report, Rect(x, y, card_width, card_height), Scalar(255, 255, 255), FILLED);
+        rectangle(report, Rect(x, y, card_width, card_height), colour, 1);
+        const Rect roi = crop_region & Rect(0, 0, image.cols, image.rows);
+        if (!roi.empty()) {
+            Mat thumb;
+            resize(image(roi), thumb, Size(64, 64));
+            thumb.copyTo(report(Rect(x + 8, y + 8, 64, 64)));
+        } else {
+            putText(report, "No crop", Point(x + 9, y + 42),
+                FONT_HERSHEY_SIMPLEX, 0.33, Scalar(65, 65, 65), 1, LINE_AA);
+        }
+        putText(report, outcome, Point(x + 82, y + 25),
+            FONT_HERSHEY_SIMPLEX, 0.46, colour, 1, LINE_AA);
+        putText(report, "Source: " + source, Point(x + 82, y + 48),
+            FONT_HERSHEY_SIMPLEX, 0.42, Scalar(35, 35, 35), 1, LINE_AA);
+        putText(report, labels, Point(x + 8, y + 94),
+            FONT_HERSHEY_SIMPLEX, 0.43, Scalar(35, 35, 35), 1, LINE_AA);
+        putText(report, distance, Point(x + 8, y + 117),
+            FONT_HERSHEY_SIMPLEX, 0.40, Scalar(65, 65, 65), 1, LINE_AA);
+    };
+    for (size_t i = 0; i < circles.size(); ++i) {
+        const Vec3f& ball = circles[i].detection.image_circle;
+        const int x = cvRound(ball[0]), y = cvRound(ball[1]), radius = max(2, cvRound(ball[2]));
+        const Rect crop_region(x - radius, y - radius, 2 * radius + 1, 2 * radius + 1);
         const int actual = prediction_truth[i];
-        string line = circles[i].label + ": ";
-        Scalar ink(35, 35, 35);
         if (actual < 0) {
-            ink = Scalar(0,0,200);
-            line = "FP | ground truth: — | classified: " + circles[i].label;
-            if (truth.empty()) line += " | center distance: n/a";
-            else {
-                size_t nearest = 0;
-                for (size_t t = 1; t < truth.size(); ++t)
-                    if (norm(circles[i].detection.table_center - truth[t].center)
-                        < norm(circles[i].detection.table_center - truth[nearest].center)) nearest = t;
-                line += " | center distance: " + format("%.1f",
-                    norm(circles[i].detection.table_center - truth[nearest].center));
+            string distance = "Nearest GT distance: n/a";
+            if (!truth.empty()) {
+                double nearest = numeric_limits<double>::max();
+                for (const auto& candidate : truth)
+                    nearest = min(nearest, norm(circles[i].detection.table_center - candidate.center));
+                distance = "Nearest GT distance: " + format("%.1f px", nearest);
             }
-        }
-        else {
-            const Point2f d = circles[i].detection.table_center - truth[actual].center;
-            const double distance = norm(d);
+            draw_card(crop_region, "Detection", "FALSE POSITIVE",
+                "Truth: unmatched | Predicted: " + circles[i].label, distance, Scalar(0, 0, 255));
+        } else {
             const bool label_ok = circles[i].label == truth[actual].label;
-            line = string(label_ok ? "POSITION OK" : "POSITION OK, LABEL ERROR")
-                + " | ground truth: " + truth[actual].label + " | classified: " + circles[i].label
-                + " | center distance: " + format("%.1f", distance);
-            ink = label_ok ? Scalar(0,130,0) : Scalar(0,130,220);
+            const double distance = norm(circles[i].detection.table_center - truth[actual].center);
+            draw_card(crop_region, "Detection", label_ok ? "CORRECT" : "LABEL ERROR",
+                "Truth: " + truth[actual].label + " | Predicted: " + circles[i].label,
+                "Center distance: " + format("%.1f px", distance),
+                label_ok ? Scalar(0, 150, 0) : Scalar(0, 130, 220));
         }
-        putText(report, line, Point(right_x, y0 + 23 + row++ * 23), FONT_HERSHEY_SIMPLEX, 0.34, ink, 1, LINE_AA);
     }
-    putText(report, "Circle colors: green correct label, orange label error, red FP, magenta FN.",
-        Point(12, report.rows - 10), FONT_HERSHEY_SIMPLEX, 0.38, Scalar(65,65,65), 1, LINE_AA);
+    for (size_t i = 0; i < truth.size(); ++i) {
+        if (matches[i] >= 0) continue;
+        const Rect crop_region = boundingRect(GroundTruthOutline(truth[i], inverse, 1.0));
+        draw_card(crop_region, "Ground truth", "MISSED BALL (FN)",
+            "Truth: " + truth[i].label + " | Predicted: none", "Center distance: n/a", Scalar(255, 0, 255));
+    }
+    const Scalar legend_colours[] = {
+        Scalar(0, 190, 0), Scalar(0, 165, 255), Scalar(0, 0, 255), Scalar(255, 0, 255)
+    };
+    const char* legend_labels[] = {
+        "Correct position and label", "Position OK, label error", "FP: unmatched detection", "FN: missed ground-truth ball"
+    };
+    for (int i = 0; i < 4; ++i) {
+        const int x = 12 + i * (report_width / 4);
+        circle(report, Point(x + 6, report.rows - 14), 5, legend_colours[i], 2, LINE_AA);
+        putText(report, legend_labels[i], Point(x + 18, report.rows - 10),
+            FONT_HERSHEY_SIMPLEX, 0.38, Scalar(65, 65, 65), 1, LINE_AA);
+    }
     return report;
 }
 
