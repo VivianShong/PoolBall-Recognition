@@ -702,6 +702,84 @@ Mat DrawGroundTruthCircles(const Mat& image, const vector<BallPrediction>& truth
     return preview;
 }
 
+// Show only manual differences from the supplied vector. Unchanged circles and
+// previous positions of moved balls are deliberately omitted from these PNGs.
+bool GroundTruthCenterChanged(const Point2f& original, const Point2f& corrected)
+{
+    return norm(original - corrected) > 0.001; // Ignore float serialization noise.
+}
+
+Mat DrawManualCorrections(const Mat& image, const GroundTruthImage& supplied,
+    const array<Point2f, BALL_CLASSES>& corrected, bool perspective_view)
+{
+    Mat background = image;
+    if (perspective_view)
+        warpPerspective(image, background, TablePerspectiveTransform(), TRANSFORMED_TABLE_SIZE);
+    const double scale = min({1.0, 1400.0 / background.cols, 700.0 / background.rows});
+    Mat preview;
+    resize(background, preview, Size(cvRound(background.cols * scale), cvRound(background.rows * scale)));
+    const Mat inverse = TablePerspectiveTransform().inv();
+    struct Annotation { Point center; string text; Scalar colour; bool removed; };
+    vector<Annotation> annotations;
+    string changes;
+    for (int i = 0; i < BALL_CLASSES; ++i) {
+        const Point2f original = supplied.centers[i];
+        const Point2f current = corrected[i];
+        if (!GroundTruthCenterChanged(original, current)) continue;
+        const bool removed = current == Point2f(-1, -1);
+        const bool added = original == Point2f(-1, -1);
+        const string label = BallClassName(i);
+        changes += (changes.empty() ? "" : ", ") + label + (removed ? " deleted" : added ? " added" : " corrected");
+        // Deletions are marked at their supplied location; moved balls only at
+        // their new location. Invalid supplied positions are listed in the footer.
+        const Point2f table = removed ? original : current;
+        if (!isfinite(table.x) || !isfinite(table.y) || table.x < 0 || table.y < 0
+            || table.x >= TRANSFORMED_TABLE_SIZE.width || table.y >= TRANSFORMED_TABLE_SIZE.height)
+            continue;
+        vector<Point2f> camera;
+        if (!perspective_view) perspectiveTransform(vector<Point2f>{table}, camera, inverse);
+        const Point2f position = perspective_view ? table : camera[0];
+        const Point center(cvRound(position.x * scale), cvRound(position.y * scale));
+        const Scalar colour = removed ? Scalar(0, 0, 255) : added ? Scalar(0, 255, 0) : Scalar(0, 165, 255);
+        circle(preview, center, max(1, cvRound(BALL_RADIUS * scale)), colour, 2, LINE_AA);
+        if (removed) drawMarker(preview, center, colour, MARKER_TILTED_CROSS, 12, 2, LINE_AA);
+        annotations.push_back({center, label + (removed ? " deleted" : ""), colour, removed});
+    }
+    for (const auto& annotation : annotations)
+        DrawOverlayLabel(preview, annotation.text, annotation.center, annotation.colour);
+    Mat canvas(preview.rows + 100, max(preview.cols, 1100), CV_8UC3, Scalar(30, 30, 30));
+    preview.copyTo(canvas(Rect(0, 0, preview.cols, preview.rows)));
+    const vector<string> lines = {
+        string(supplied.filename) + " - manual corrections only",
+        "Orange: corrected center/label   Green: added ball   Red + X: deleted ball",
+        "Changes: " + (changes.empty() ? string("none") : changes)
+    };
+    for (size_t i = 0; i < lines.size(); ++i)
+        putText(canvas, lines[i], Point(12, preview.rows + 24 + 28 * i),
+            FONT_HERSHEY_SIMPLEX, 0.48, Scalar(240, 240, 240), 1, LINE_AA);
+    return canvas;
+}
+
+void SaveManualCorrectionViews(const Mat& image, const GroundTruthImage& supplied,
+    const array<Point2f, BALL_CLASSES>& corrected, bool save_perspective = true)
+{
+    bool changed = false;
+    for (int i = 0; i < BALL_CLASSES; ++i)
+        changed = changed || GroundTruthCenterChanged(supplied.centers[i], corrected[i]);
+    if (!changed) return; // No empty PNGs for tables without corrections.
+    const filesystem::path directory = "output/evaluation/corrected/manual_corrections";
+    filesystem::create_directories(directory);
+    const string stem = filesystem::path(supplied.filename).stem().string();
+    const auto save = [&](bool perspective) {
+        const auto path = directory / (stem + "_manual_corrections" + (perspective ? "_perspective.png" : ".png"));
+        if (!imwrite(path.string(), DrawManualCorrections(image, supplied, corrected, perspective)))
+            throw runtime_error("Cannot save manual correction PNG: " + path.string());
+        cout << "Saved manual corrections: " << path.string() << '\n';
+    };
+    save(false);
+    if (save_perspective) save(true);
+}
+
 Mat DrawDetectionOutcomes(const Mat& image, const vector<ClassifiedCircle>& circles,
     const vector<BallPrediction>& truth, const string& filename, bool perspective_view = false)
 {
@@ -886,6 +964,13 @@ void RunEvaluationPass(bool visualize, bool save_perspective, bool use_corrected
         } catch (const exception& error) {
             cerr << "Cannot evaluate ground truth: " << error.what() << '\n';
             return;
+        }
+        if (use_corrected) {
+            try {
+                SaveManualCorrectionViews(source, supplied, centers, save_perspective);
+            } catch (const exception& error) {
+                cerr << "Cannot save correction views: " << error.what() << '\n';
+            }
         }
         const size_t excluded_before = excluded;
         vector<BallPrediction> truth;
@@ -1366,6 +1451,18 @@ void SaveManualGroundTruth(const string& filename, const array<Point2f, BALL_CLA
     file.close();
     if (!file) throw runtime_error("Cannot save " + path.string());
     filesystem::rename(temporary, path);
+    // Keep the correction PNGs in sync whenever annotations are saved.
+    for (const auto& supplied : SuppliedGroundTruth()) {
+        if (filename != supplied.filename) continue;
+        try {
+            const Mat image = imread("Media/Pool/" + filename);
+            if (image.empty()) throw runtime_error("Cannot open " + filename);
+            SaveManualCorrectionViews(image, supplied, centers);
+        } catch (const exception& error) {
+            cerr << "CSV saved, but correction PNG failed: " << error.what() << '\n';
+        }
+        break;
+    }
 }
 
 struct GroundTruthSession {
