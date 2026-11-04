@@ -47,7 +47,7 @@ std::vector<LabeledCircle> labeled_circles = {
     {"14", cv::Point2f(1444.50000f, 195.500000f), 23.2999992f},
     {"15", cv::Point2f(1508.50000f, 197.500000f), 21.1000004f},
     {"White", cv::Point2f(1036.50000f, 171.500000f), 21.7999992f},
-    {"net", cv::Point2f(963.500000f, 30.5000000f), 21.0000000f},
+    {"table", cv::Point2f(963.500000f, 30.5000000f), 21.0000000f},
     {"table", cv::Point2f(951.456360f, 442.374542f), 47.4297943f},
     {"table", cv::Point2f(394.977264f, 115.860001f), 41.4302216f},
     {"table", cv::Point2f(103.571815f, 426.575439f), 38.5401459f},
@@ -1004,7 +1004,7 @@ void RunEvaluationPass(bool visualize, bool save_perspective, bool use_corrected
         cerr << "Cannot build reference histograms: " << error.what() << '\n';
         return;
     }
-    cout << "Precomputed " << references.size() << " circular HLS references (balls/net/table).\n";
+    cout << "Precomputed " << references.size() << " circular HLS references (balls/table background).\n";
     EvaluationResult total, detector_total;
     size_t excluded = 0, evaluated_images = 0;
     vector<ImageEvaluation> image_results, detector_results;
@@ -1145,7 +1145,6 @@ struct LabelSession {
     vector<Vec3f> table_regions;
     int selected_table = -1;
     bool selecting_table = false;
-    bool selecting_net = false;
     bool dragging_table = false;
     bool table_regions_applied = true;
     Point2f drag_center, drag_edge;
@@ -1168,7 +1167,7 @@ void SelectCircle(int event, int x, int y, int, void* userdata)
         static_cast<float>(y / session.display_scale));
     const bool inside_image = x >= 0 && x < session.image_width
         && y >= 0 && y < session.image_height;
-    if (session.selecting_table || session.selecting_net) {
+    if (session.selecting_table) {
         if (event == EVENT_LBUTTONDOWN && inside_image) {
             session.dragging_table = true;
             session.drag_center = session.drag_edge = point;
@@ -1178,15 +1177,7 @@ void SelectCircle(int event, int x, int y, int, void* userdata)
             session.dragging_table = false;
             const Vec3f region(session.drag_center.x, session.drag_center.y,
                 static_cast<float>(norm(point - session.drag_center)));
-            if (session.selecting_net && ValidReferenceRegion(region)) {
-                session.circles.push_back(region);
-                session.labels.push_back("net");
-                session.applied.push_back(false);
-                session.selected = static_cast<int>(session.circles.size()) - 1;
-                session.selected_table = -1;
-                session.selecting_net = false;
-                session.message = "Net circle added. R adds another; Enter saves all samples.";
-            } else if (session.selecting_table && ValidReferenceRegion(region)) {
+            if (ValidReferenceRegion(region)) {
                 session.table_regions.push_back(region);
                 session.selected_table = static_cast<int>(session.table_regions.size()) - 1;
                 session.selected = -1;
@@ -1194,9 +1185,7 @@ void SelectCircle(int event, int x, int y, int, void* userdata)
                 session.selecting_table = false;
                 session.message = "Cloth region added. T adds another; Enter saves all samples.";
             } else {
-                session.message = session.selecting_net
-                    ? "Drag a net circle with its center in the image and radius >= 5. R cancels."
-                    : "Drag a reference circle with radius >= 5 pixels. T cancels.";
+                session.message = "Drag a reference circle with radius >= 5 pixels. T cancels.";
             }
         }
         return;
@@ -1235,7 +1224,7 @@ string LabelForKey(int key)
         return "";
     key = tolower(static_cast<unsigned char>(key));
     if (key == 'w') return "White";
-    if (key == 'n') return "net";
+    if (key == 'n') return "table";
     if (key >= '1' && key <= '9') return string(1, static_cast<char>(key));
     if (key >= 'a' && key <= 'f') return to_string(10 + key - 'a');
     return "";
@@ -1244,7 +1233,7 @@ string LabelForKey(int key)
 string CircleLabelText(const string& label)
 {
     if (label == "White") return "w";
-    if (label == "net") return "n";
+    if (label == "net") return "table";
     return label;
 }
 
@@ -1269,7 +1258,7 @@ string UpdateLabeledCircles(LabelSession& session,
         file.open(temporary, ios::trunc);
         file.imbue(locale::classic());
         file << "// Source: Media/Pool/AllBalls.jpeg; original image pixel coordinates.\n"
-             << "// Circular regions: ball labels, net, and table cloth.\n"
+             << "// Circular regions: ball labels and table background (net/cloth).\n"
              << "struct LabeledCircle {\n"
              << "    std::string label;\n    cv::Point2f center;\n    float radius;\n};\n\n"
              << "std::vector<LabeledCircle> labeled_circles = {\n";
@@ -1337,7 +1326,7 @@ void LabelCircles(const Mat& image, const vector<Vec3f>& circles)
     session.image_height = cvRound(image.rows * session.display_scale);
     namedWindow(LABEL_WINDOW, WINDOW_AUTOSIZE);
     setMouseCallback(LABEL_WINDOW, SelectCircle, &session);
-    string status = "T: draw cloth. R: draw a net circle manually. Enter saves; Esc saves and exits.";
+    string status = "T: draw cloth. Enter saves; Esc saves and exits.";
     cout << status << endl;
 
     while (true) {
@@ -1389,10 +1378,10 @@ void LabelCircles(const Mat& image, const vector<Vec3f>& circles)
         }
         putText(canvas, status, Point(12, session.image_height + 23),
             FONT_HERSHEY_SIMPLEX, 0.48, Scalar(30, 30, 30), 1, LINE_AA);
-        putText(canvas, "w: white    n: net    1-9: balls 1-9    a-f: balls 10-15",
+        putText(canvas, "w: white    n: not a ball    1-9: balls 1-9    a-f: balls 10-15",
             Point(12, session.image_height + 53), FONT_HERSHEY_SIMPLEX,
             0.55, Scalar(30, 30, 30), 1, LINE_AA);
-        putText(canvas, "t: draw cloth    r: draw net (center to edge)    Backspace: remove cloth",
+        putText(canvas, "t: draw cloth    Backspace: remove cloth",
             Point(12, session.image_height + 80), FONT_HERSHEY_SIMPLEX,
             0.5, Scalar(60, 60, 60), 1, LINE_AA);
         putText(canvas, "Enter: save all samples to file. Esc: save and exit.",
@@ -1413,20 +1402,10 @@ void LabelCircles(const Mat& image, const vector<Vec3f>& circles)
         }
         if (key == 't' || key == 'T') {
             session.selecting_table = !session.selecting_table;
-            session.selecting_net = false;
             session.dragging_table = false;
             status = session.selecting_table
                 ? "Drag from the center of clean cloth to its edge. T cancels."
                 : "Circle labeling mode. T selects cloth.";
-            continue;
-        }
-        if (key == 'r' || key == 'R') {
-            session.selecting_net = !session.selecting_net;
-            session.selecting_table = false;
-            session.dragging_table = false;
-            status = session.selecting_net
-                ? "Drag from the net circle's center to its edge. R cancels."
-                : "Circle labeling mode. R draws a net reference.";
             continue;
         }
         if (key == 8 || key == 127) {
@@ -1440,7 +1419,7 @@ void LabelCircles(const Mat& image, const vector<Vec3f>& circles)
             }
             continue;
         }
-        if (session.selecting_table || session.selecting_net) continue;
+        if (session.selecting_table) continue;
         const string key_label = LabelForKey(key);
         if (session.selected < 0 || key_label.empty())
             continue;
@@ -1641,7 +1620,7 @@ void ApplyGroundTruthLabel(GroundTruthSession& session, int key)
         return;
     }
     const string label = LabelForKey(key);
-    if (label.empty() || label == "net") return;
+    if (label.empty() || label == "net" || label == "table") return;
     const int target = BallClassIndex(label);
     if (session.pending != Point2f(-1, -1)) {
         vector<Point2f> transformed;
