@@ -421,26 +421,29 @@ struct EvaluationResult {
 };
 
 EvaluationResult Evaluation(const vector<BallPrediction>& predictions,
-    const vector<BallPrediction>& truth)
+    const vector<BallPrediction>& truth, bool evaluate_labels = true)
 {
     EvaluationResult result;
     // Validate all labels, including unmatched predictions.
-    for (const auto& prediction : predictions) BallClassIndex(prediction.label);
+    if (evaluate_labels)
+        for (const auto& prediction : predictions) BallClassIndex(prediction.label);
     const vector<int> matches = MatchCenters(predictions, truth);
     vector<bool> used(predictions.size(), false);
     for (size_t i = 0; i < truth.size(); ++i) {
-        const int actual = BallClassIndex(truth[i].label);
+        const int actual = evaluate_labels ? BallClassIndex(truth[i].label) : BACKGROUND;
         const int match = matches[i];
         if (match < 0) {
             ++result.fn;
-            ++result.confusion[actual][BACKGROUND]; // Missed ball.
+            if (evaluate_labels) ++result.confusion[actual][BACKGROUND]; // Missed ball.
             continue;
         }
         used[match] = true;
         ++result.tp;
-        const int predicted = BallClassIndex(predictions[match].label);
-        ++result.confusion[actual][predicted];
-        if (actual == predicted) ++result.correct_labels;
+        if (evaluate_labels) {
+            const int predicted = BallClassIndex(predictions[match].label);
+            ++result.confusion[actual][predicted];
+            if (actual == predicted) ++result.correct_labels;
+        }
         const Point2f difference = truth[i].center - predictions[match].center;
         result.squared_center_error += static_cast<double>(difference.x) * difference.x
             + static_cast<double>(difference.y) * difference.y;
@@ -448,7 +451,8 @@ EvaluationResult Evaluation(const vector<BallPrediction>& predictions,
     for (size_t i = 0; i < predictions.size(); ++i)
         if (!used[i]) {
             ++result.fp;
-            ++result.confusion[BACKGROUND][BallClassIndex(predictions[i].label)];
+            if (evaluate_labels)
+                ++result.confusion[BACKGROUND][BallClassIndex(predictions[i].label)];
         }
     return result;
 }
@@ -472,15 +476,17 @@ void PrintRatio(const char* name, double numerator, size_t denominator)
     else cout << numerator / denominator << '\n';
 }
 
-void PrintEvaluation(const string& name, const EvaluationResult& result)
+void PrintEvaluation(const string& name, const EvaluationResult& result, bool evaluate_labels = true)
 {
     cout << '\n' << name << ": TP=" << result.tp << " FP=" << result.fp
          << " FN=" << result.fn << '\n';
     PrintRatio("Precision", result.tp, result.tp + result.fp);
     PrintRatio("Recall", result.tp, result.tp + result.fn);
     PrintRatio("F1", 2.0 * result.tp, 2 * result.tp + result.fp + result.fn);
-    PrintRatio("Classification accuracy (matched balls)", result.correct_labels, result.tp);
-    PrintRatio("Correctly identified recall", result.correct_labels, result.tp + result.fn);
+    if (evaluate_labels) {
+        PrintRatio("Classification accuracy (matched balls)", result.correct_labels, result.tp);
+        PrintRatio("Correctly identified recall", result.correct_labels, result.tp + result.fn);
+    }
     PrintRatio("Center MSE (pixels^2, matched balls)", result.squared_center_error, result.tp);
     cout << "  Center RMSE (pixels, matched balls): ";
     if (result.tp == 0) cout << "N/A\n";
@@ -510,12 +516,14 @@ void WriteCsvField(ostream& file, const string& value)
 }
 
 void WriteEvaluationRow(ostream& file, const string& name,
-    const EvaluationResult& result, size_t excluded, size_t images)
+    const EvaluationResult& result, size_t excluded, size_t images, bool evaluate_labels = true)
 {
     WriteCsvField(file, name);
     file << ',' << result.tp << ',' << result.fp << ',' << result.fn
          << ',' << result.tp + result.fn << ',' << result.tp + result.fp
-         << ',' << result.correct_labels;
+         << ',';
+    if (evaluate_labels) file << result.correct_labels;
+    else file << "N/A";
     const auto ratio = [&file](double numerator, size_t denominator) {
         file << ',';
         if (denominator == 0) file << "N/A";
@@ -524,8 +532,10 @@ void WriteEvaluationRow(ostream& file, const string& name,
     ratio(result.tp, result.tp + result.fp);
     ratio(result.tp, result.tp + result.fn);
     ratio(2.0 * result.tp, 2 * result.tp + result.fp + result.fn);
-    ratio(result.correct_labels, result.tp);
-    ratio(result.correct_labels, result.tp + result.fn);
+    if (evaluate_labels) {
+        ratio(result.correct_labels, result.tp);
+        ratio(result.correct_labels, result.tp + result.fn);
+    } else file << ",N/A,N/A";
     ratio(result.squared_center_error, result.tp);
     file << ',';
     if (result.tp == 0) file << "N/A";
@@ -535,6 +545,7 @@ void WriteEvaluationRow(ostream& file, const string& name,
 
 void WriteEvaluationCsv(const vector<ImageEvaluation>& images,
     const EvaluationResult& total, const vector<ExcludedGroundTruth>& exclusions,
+    const vector<ImageEvaluation>& detector_images, const EvaluationResult& detector_total,
     const filesystem::path& directory = "output/evaluation")
 {
     try {
@@ -547,15 +558,20 @@ void WriteEvaluationCsv(const vector<ImageEvaluation>& images,
             file << setprecision(10);
             return file;
         };
-        auto results = open_csv("results.csv");
-        results << "image,tp,fp,fn,ground_truth_count,prediction_count,correct_labels,"
-                << "precision,recall,f1,classification_accuracy,correctly_identified_recall,"
-                << "center_mse_pixels_squared,center_rmse_pixels,excluded_ground_truth,"
-                << "evaluated_images,match_distance_pixels\n";
-        for (const auto& image : images)
-            WriteEvaluationRow(results, image.filename, image.result, image.excluded_gt, 1);
-        WriteEvaluationRow(results, "Pooled total", total, exclusions.size(), images.size());
-        results.close();
+        const auto write_results = [&](const char* filename, const vector<ImageEvaluation>& rows,
+            const EvaluationResult& pooled, bool evaluate_labels) {
+            auto results = open_csv(filename);
+            results << "image,tp,fp,fn,ground_truth_count,prediction_count,correct_labels,"
+                    << "precision,recall,f1,classification_accuracy,correctly_identified_recall,"
+                    << "center_mse_pixels_squared,center_rmse_pixels,excluded_ground_truth,"
+                    << "evaluated_images,match_distance_pixels\n";
+            for (const auto& image : rows)
+                WriteEvaluationRow(results, image.filename, image.result, image.excluded_gt, 1, evaluate_labels);
+            WriteEvaluationRow(results, "Pooled total", pooled, exclusions.size(), rows.size(), evaluate_labels);
+            results.close();
+        };
+        write_results("results.csv", images, total, true);
+        write_results("detector_results.csv", detector_images, detector_total, false);
 
         auto confusion = open_csv("confusion_matrix.csv");
         confusion << "ground_truth/prediction";
@@ -800,7 +816,7 @@ void SaveEvaluationViews(const string& filename, const Mat& ground_truth, const 
     }
 }
 
-void RunEvaluation(bool visualize = true, bool save_perspective = false)
+void RunEvaluation(bool visualize = true, bool save_perspective = true)
 {
     // MyApplication loads the source images first; clear those windows before
     // starting the per-table evaluation sequence.
@@ -819,9 +835,9 @@ void RunEvaluation(bool visualize = true, bool save_perspective = false)
         return;
     }
     cout << "Precomputed " << references.size() << " circular HLS references (balls/net/table).\n";
-    EvaluationResult total;
+    EvaluationResult total, detector_total;
     size_t excluded = 0, evaluated_images = 0;
-    vector<ImageEvaluation> image_results;
+    vector<ImageEvaluation> image_results, detector_results;
     vector<ExcludedGroundTruth> exclusions;
     for (const auto& supplied : SuppliedGroundTruth()) {
         const Mat source = imread(string("Media/Pool/") + supplied.filename);
@@ -845,6 +861,14 @@ void RunEvaluation(bool visualize = true, bool save_perspective = false)
             truth.push_back({center, BallClassName(i)});
         }
         const vector<DetectedCircle> detections = Detector(source);
+        vector<BallPrediction> detector_predictions;
+        detector_predictions.reserve(detections.size());
+        for (const auto& detection : detections)
+            detector_predictions.push_back({detection.table_center, ""});
+        const EvaluationResult detector_result = Evaluation(detector_predictions, truth, false);
+        PrintEvaluation(string(supplied.filename) + " - detector only", detector_result, false);
+        detector_results.push_back({supplied.filename, detector_result, excluded - excluded_before});
+        AddEvaluation(detector_total, detector_result);
         const vector<ClassifiedCircle> circles = Classifier(source, detections, references);
         cout << supplied.filename << ": " << detections.size() << " candidates -> "
              << circles.size() << " retained after Classifier\n";
@@ -852,7 +876,7 @@ void RunEvaluation(bool visualize = true, bool save_perspective = false)
         for (const auto& circle : circles)
             predictions.push_back({circle.detection.table_center, circle.label});
         const EvaluationResult result = Evaluation(predictions, truth);
-        PrintEvaluation(supplied.filename, result);
+        PrintEvaluation(string(supplied.filename) + " - after classification/filtering", result);
         image_results.push_back({supplied.filename, result, excluded - excluded_before});
         AddEvaluation(total, result);
         ++evaluated_images;
@@ -882,7 +906,8 @@ void RunEvaluation(bool visualize = true, bool save_perspective = false)
     if (visualize && evaluated_images > 0) {
         destroyWindow("Pool ball evaluation");
     }
-    PrintEvaluation("Pooled total", total);
+    PrintEvaluation("Pooled total - detector only", detector_total, false);
+    PrintEvaluation("Pooled total - after classification/filtering", total);
     cout << "Evaluated images: " << evaluated_images << "/6; excluded GT entries: " << excluded << '\n';
     cout << "\nConfusion matrix: rows=ground truth, columns=prediction.\n"
          << "BG column=missed ball; BG row=unmatched prediction; BG/BG is unused.\n";
@@ -894,7 +919,7 @@ void RunEvaluation(bool visualize = true, bool save_perspective = false)
         for (int j = 0; j <= BALL_CLASSES; ++j) cout << setw(6) << total.confusion[i][j];
         cout << '\n';
     }
-    WriteEvaluationCsv(image_results, total, exclusions);
+    WriteEvaluationCsv(image_results, total, exclusions, detector_results, detector_total);
 }
 
 const char* LABEL_WINDOW = "AllBalls circle detection";
