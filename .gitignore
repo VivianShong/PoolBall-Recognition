@@ -8,3 +8,7 @@
 !/Media/Pool/
 /Media/Pool/*
 !/Media/Pool/ground_truth/
+
+!/documents/
+/documents/*
+!/documents/sessions.md
