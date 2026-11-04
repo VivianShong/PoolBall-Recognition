@@ -926,6 +926,64 @@ void SaveEvaluationViews(const string& filename, const Mat& ground_truth, const 
 
 bool LoadManualGroundTruth(const string& filename, array<Point2f, BALL_CLASSES>& centers);
 
+// Report-only evidence from the same detector and classifier; no parameter changes.
+void SaveReportProcessingViews()
+{
+    const filesystem::path directory = "output/evaluation/report_assets";
+    filesystem::create_directories(directory);
+    const Mat training = imread("Media/Pool/AllBalls.jpeg");
+    const Mat source = imread("Media/Pool/Table3.jpeg");
+    if (training.empty() || source.empty())
+        throw runtime_error("Cannot load report illustration images.");
+    const auto references = BuildReferenceHistograms(training, labeled_circles);
+    const auto detections = Detector(source);
+    const auto retained = Classifier(source, detections, references);
+    Mat grey, candidates = source.clone(), rectified;
+    cvtColor(source, grey, COLOR_BGR2GRAY);
+    for (const auto& detection : detections) {
+        bool accepted = false;
+        for (const auto& ball : retained)
+            if (norm(ball.detection.table_center - detection.table_center) < 0.001)
+                accepted = true;
+        const Vec3f c = detection.image_circle;
+        circle(candidates, Point(cvRound(c[0]), cvRound(c[1])), cvRound(c[2]),
+            accepted ? Scalar(0, 255, 0) : Scalar(0, 165, 255), 2, LINE_AA);
+    }
+    warpPerspective(source, rectified, TablePerspectiveTransform(), TRANSFORMED_TABLE_SIZE);
+    for (const auto& ball : retained) {
+        const Point center(cvRound(ball.detection.table_center.x), cvRound(ball.detection.table_center.y));
+        circle(rectified, center, cvRound(BALL_RADIUS), Scalar(0, 255, 0), 1, LINE_AA);
+        DrawOverlayLabel(rectified, ball.label, center, Scalar(255, 255, 255));
+    }
+    imwrite((directory / "Table3_input.png").string(), source);
+    imwrite((directory / "Table3_grey.png").string(), grey);
+    imwrite((directory / "Table3_candidates.png").string(), candidates);
+    imwrite((directory / "Table3_rectified.png").string(), rectified);
+    Mat samples = training.clone();
+    for (const auto& sample : labeled_circles) {
+        const Point center(cvRound(sample.center.x), cvRound(sample.center.y));
+        circle(samples, center, cvRound(sample.radius), Scalar(0, 255, 255), 2, LINE_AA);
+        DrawOverlayLabel(samples, sample.label, center, Scalar(255, 255, 255));
+    }
+    imwrite((directory / "AllBalls_samples.png").string(), samples);
+    // Marginals illustrate the actual joint descriptor, without replacing it.
+    ofstream marginals(directory / "reference_marginals.csv");
+    marginals << "label,channel,bin,probability\n" << setprecision(10);
+    for (const auto& reference : references) {
+        for (int channel = 0; channel < 3; ++channel) {
+            const int bin_count = channel == 0 ? 18 : 8;
+            vector<double> values(bin_count, 0.0);
+            for (int h = 0; h < 18; ++h)
+                for (int l = 0; l < 8; ++l)
+                    for (int s = 0; s < 8; ++s)
+                        values[channel == 0 ? h : channel == 1 ? l : s]
+                            += reference.histogram.at<float>(h, l, s);
+            for (int bin = 0; bin < bin_count; ++bin)
+                marginals << reference.label << ',' << channel << ',' << bin << ',' << values[bin] << '\n';
+        }
+    }
+}
+
 void RunEvaluationPass(bool visualize, bool save_perspective, bool use_corrected,
     const filesystem::path& directory)
 {
@@ -1051,6 +1109,11 @@ void RunEvaluationPass(bool visualize, bool save_perspective, bool use_corrected
 
 void RunEvaluation(bool visualize = true, bool save_perspective = true)
 {
+    try {
+        SaveReportProcessingViews();
+    } catch (const exception& error) {
+        cerr << "Could not save report processing views: " << error.what() << '\n';
+    }
     // Always preserve the baseline supplied-truth results. Manual CSVs never replace it.
     RunEvaluationPass(visualize, save_perspective, false, "output/evaluation");
     bool corrected = false;
