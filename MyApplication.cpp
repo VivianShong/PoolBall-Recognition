@@ -1,6 +1,16 @@
 ﻿
 #include "Utilities.h"
+// Visual Studio defaults to C++14. Use its filesystem TS in that mode.
+#if defined(_MSC_VER) && (!defined(_MSVC_LANG) || _MSVC_LANG < 201703L)
+#ifndef _SILENCE_EXPERIMENTAL_FILESYSTEM_DEPRECATION_WARNING
+#define _SILENCE_EXPERIMENTAL_FILESYSTEM_DEPRECATION_WARNING
+#endif
+#include <experimental/filesystem>
+namespace app_fs = std::experimental::filesystem;
+#else
 #include <filesystem>
+namespace app_fs = std::filesystem;
+#endif
 #include <fstream>
 #include <locale>
 #include <algorithm>
@@ -547,14 +557,14 @@ void WriteEvaluationRow(ostream& file, const string& name,
 void WriteEvaluationCsv(const vector<ImageEvaluation>& images,
     const EvaluationResult& total, const vector<ExcludedGroundTruth>& exclusions,
     const vector<ImageEvaluation>& detector_images, const EvaluationResult& detector_total,
-    const filesystem::path& directory = "output/evaluation")
+    const app_fs::path& directory = "output/evaluation")
 {
     try {
-        filesystem::create_directories(directory);
+        app_fs::create_directories(directory);
         const auto open_csv = [&directory](const char* filename) {
             ofstream file;
             file.exceptions(ios::failbit | ios::badbit);
-            file.open(directory / filename, ios::trunc);
+            file.open((directory / filename).string(), ios::trunc);
             file.imbue(locale::classic());
             file << setprecision(10);
             return file;
@@ -767,9 +777,9 @@ void SaveManualCorrectionViews(const Mat& image, const GroundTruthImage& supplie
     for (int i = 0; i < BALL_CLASSES; ++i)
         changed = changed || GroundTruthCenterChanged(supplied.centers[i], corrected[i]);
     if (!changed) return; // No empty PNGs for tables without corrections.
-    const filesystem::path directory = "output/evaluation/corrected/manual_corrections";
-    filesystem::create_directories(directory);
-    const string stem = filesystem::path(supplied.filename).stem().string();
+    const app_fs::path directory = "output/evaluation/corrected/manual_corrections";
+    app_fs::create_directories(directory);
+    const string stem = app_fs::path(supplied.filename).stem().string();
     const auto save = [&](bool perspective) {
         const auto path = directory / (stem + "_manual_corrections" + (perspective ? "_perspective.png" : ".png"));
         if (!imwrite(path.string(), DrawManualCorrections(image, supplied, corrected, perspective)))
@@ -899,25 +909,25 @@ Mat DrawDetectionOutcomes(const Mat& image, const vector<ClassifiedCircle>& circ
 
 void SaveEvaluationViews(const string& filename, const Mat& ground_truth, const Mat& labels, const Mat& outcomes,
     const Mat& perspective_ground_truth = Mat(), const Mat& perspective_labels = Mat(), const Mat& perspective_outcomes = Mat(),
-    const filesystem::path& directory = "output/evaluation/visualizations")
+    const app_fs::path& directory = "output/evaluation/visualizations")
 {
     try {
-        filesystem::create_directories(directory);
-        const string stem = filesystem::path(filename).stem().string();
+        app_fs::create_directories(directory);
+        const string stem = app_fs::path(filename).stem().string();
         if (!imwrite((directory / (stem + "_ground_truth.png")).string(), ground_truth)
             || !imwrite((directory / (stem + "_labels.png")).string(), labels)
             || !imwrite((directory / (stem + "_outcomes.png")).string(), outcomes))
             cerr << "Could not save visualization for " << filename << '\n';
         if (!perspective_ground_truth.empty()) {
-            const filesystem::path perspective_directory = directory / "perspective";
-            filesystem::create_directories(perspective_directory);
+            const app_fs::path perspective_directory = directory / "perspective";
+            app_fs::create_directories(perspective_directory);
             if (!imwrite((perspective_directory / (stem + "_ground_truth_perspective.png")).string(), perspective_ground_truth)
                 || !imwrite((perspective_directory / (stem + "_labels_perspective.png")).string(), perspective_labels)
                 || !imwrite((perspective_directory / (stem + "_outcomes_perspective.png")).string(), perspective_outcomes))
                 cerr << "Could not save perspective views for " << filename << '\n';
             else
                 cout << "Saved " << filename << " perspective views to "
-                     << filesystem::absolute(perspective_directory).string() << '\n';
+                     << app_fs::absolute(perspective_directory).string() << '\n';
         }
     } catch (const std::exception& error) {
         cerr << "Could not save evaluation views: " << error.what() << '\n';
@@ -926,34 +936,28 @@ void SaveEvaluationViews(const string& filename, const Mat& ground_truth, const 
 
 bool LoadManualGroundTruth(const string& filename, array<Point2f, BALL_CLASSES>& centers);
 
-// Report-only evidence from the same detector and classifier; no parameter changes.
+// Report-only detection views and histogram summaries; no parameter changes.
 void SaveReportProcessingViews()
 {
-    const filesystem::path directory = "output/evaluation/report_assets";
-    filesystem::create_directories(directory);
+    const app_fs::path directory = "output/evaluation/report_assets";
+    app_fs::create_directories(directory);
     const Mat training = imread("Media/Pool/AllBalls.jpeg");
     const Mat source = imread("Media/Pool/Table3.jpeg");
     if (training.empty() || source.empty())
         throw runtime_error("Cannot load report illustration images.");
     const auto references = BuildReferenceHistograms(training, labeled_circles);
     const auto detections = Detector(source);
-    const auto retained = Classifier(source, detections, references);
     Mat grey, candidates = source.clone(), rectified;
     cvtColor(source, grey, COLOR_BGR2GRAY);
     for (const auto& detection : detections) {
-        bool accepted = false;
-        for (const auto& ball : retained)
-            if (norm(ball.detection.table_center - detection.table_center) < 0.001)
-                accepted = true;
         const Vec3f c = detection.image_circle;
         circle(candidates, Point(cvRound(c[0]), cvRound(c[1])), cvRound(c[2]),
-            accepted ? Scalar(0, 255, 0) : Scalar(0, 165, 255), 2, LINE_AA);
+            Scalar(0, 255, 0), 2, LINE_AA);
     }
     warpPerspective(source, rectified, TablePerspectiveTransform(), TRANSFORMED_TABLE_SIZE);
-    for (const auto& ball : retained) {
-        const Point center(cvRound(ball.detection.table_center.x), cvRound(ball.detection.table_center.y));
+    for (const auto& detection : detections) {
+        const Point center(cvRound(detection.table_center.x), cvRound(detection.table_center.y));
         circle(rectified, center, cvRound(BALL_RADIUS), Scalar(0, 255, 0), 1, LINE_AA);
-        DrawOverlayLabel(rectified, ball.label, center, Scalar(255, 255, 255));
     }
     imwrite((directory / "Table3_input.png").string(), source);
     imwrite((directory / "Table3_grey.png").string(), grey);
@@ -967,7 +971,7 @@ void SaveReportProcessingViews()
     }
     imwrite((directory / "AllBalls_samples.png").string(), samples);
     // Marginals illustrate the actual joint descriptor, without replacing it.
-    ofstream marginals(directory / "reference_marginals.csv");
+    ofstream marginals((directory / "reference_marginals.csv").string());
     marginals << "label,channel,bin,probability\n" << setprecision(10);
     for (const auto& reference : references) {
         for (int channel = 0; channel < 3; ++channel) {
@@ -985,7 +989,7 @@ void SaveReportProcessingViews()
 }
 
 void RunEvaluationPass(bool visualize, bool save_perspective, bool use_corrected,
-    const filesystem::path& directory)
+    const app_fs::path& directory)
 {
     // MyApplication loads the source images first; clear those windows before
     // starting the per-table evaluation sequence.
@@ -1238,7 +1242,7 @@ string CircleLabelText(const string& label)
 }
 
 string UpdateLabeledCircles(LabelSession& session,
-    const filesystem::path& output = "Media/Pool/AllBalls_labels.txt")
+    const app_fs::path& output = "Media/Pool/AllBalls_labels.txt")
 {
     vector<LabeledCircle> updated;
     for (size_t i = 0; i < session.circles.size(); ++i) {
@@ -1250,12 +1254,12 @@ string UpdateLabeledCircles(LabelSession& session,
         updated.push_back({"table", Point2f(region[0], region[1]), region[2]});
     try {
         if (!output.parent_path().empty())
-            filesystem::create_directories(output.parent_path());
-        filesystem::path temporary = output;
+            app_fs::create_directories(output.parent_path());
+        app_fs::path temporary = output;
         temporary += ".tmp";
         ofstream file;
         file.exceptions(ios::failbit | ios::badbit);
-        file.open(temporary, ios::trunc);
+        file.open(temporary.string(), ios::trunc);
         file.imbue(locale::classic());
         file << "// Source: Media/Pool/AllBalls.jpeg; original image pixel coordinates.\n"
              << "// Circular regions: ball labels and table background (net/cloth).\n"
@@ -1269,7 +1273,7 @@ string UpdateLabeledCircles(LabelSession& session,
                  << sample.radius << "f},\n";
         file << "};\n";
         file.close();
-        filesystem::rename(temporary, output);
+        app_fs::rename(temporary, output);
     } catch (const std::exception& error) {
         cerr << "Could not save reference samples: " << error.what() << endl;
         return "Save failed. See terminal; Enter retries.";
@@ -1431,17 +1435,17 @@ void LabelCircles(const Mat& image, const vector<Vec3f>& circles)
         setMouseCallback(LABEL_WINDOW, nullptr, nullptr);
 }
 // CSV coordinates use the same transformed table space as evaluation.
-filesystem::path GroundTruthPath(const string& filename)
+app_fs::path GroundTruthPath(const string& filename)
 {
-    return filesystem::path("Media/Pool/ground_truth") /
-        (filesystem::path(filename).stem().string() + ".csv");
+    return app_fs::path("Media/Pool/ground_truth") /
+        (app_fs::path(filename).stem().string() + ".csv");
 }
 
 bool LoadManualGroundTruth(const string& filename, array<Point2f, BALL_CLASSES>& centers)
 {
     const auto path = GroundTruthPath(filename);
-    if (!filesystem::exists(path)) return false;
-    ifstream file(path);
+    if (!app_fs::exists(path)) return false;
+    ifstream file(path.string());
     string line;
     if (!file || !getline(file, line) || line != "label,x,y")
         throw runtime_error("Invalid ground-truth header: " + path.string());
@@ -1482,7 +1486,7 @@ void SaveManualGroundTruth(const string& filename, const array<Point2f, BALL_CLA
     }
     if (!invalid.empty()) throw runtime_error("Correct or delete out-of-bounds balls before saving: " + invalid);
     const auto path = GroundTruthPath(filename);
-    filesystem::create_directories(path.parent_path());
+    app_fs::create_directories(path.parent_path());
     const auto temporary = path.string() + ".tmp";
     ofstream file(temporary);
     file.imbue(locale::classic());
@@ -1492,7 +1496,7 @@ void SaveManualGroundTruth(const string& filename, const array<Point2f, BALL_CLA
             file << BallClassName(i) << ',' << centers[i].x << ',' << centers[i].y << '\n';
     file.close();
     if (!file) throw runtime_error("Cannot save " + path.string());
-    filesystem::rename(temporary, path);
+    app_fs::rename(temporary, path);
     // Keep the correction PNGs in sync whenever annotations are saved.
     for (const auto& supplied : SuppliedGroundTruth()) {
         if (filename != supplied.filename) continue;
@@ -1797,3 +1801,9 @@ void MyApplication(bool label_mode, bool save_perspective)
 
 }
 
+
+// Keep the original entry point used by the supplied Visual Studio main/header.
+void MyApplication()
+{
+    MyApplication(false, true);
+}
