@@ -111,8 +111,14 @@ struct DetectedCircle {
     Point2f table_center; // Perspective-transformed center for evaluation.
 };
 
-// Detection owns the coordinate conversion; evaluation receives table coordinates.
-vector<DetectedCircle> Detector(const Mat& image)
+struct HistogramReference;
+const vector<HistogramReference>& ReferenceHistograms();
+vector<DetectedCircle> FilterOutTableCandidates(const Mat& image,
+    const vector<DetectedCircle>& candidates, const vector<HistogramReference>& references);
+
+// Detection owns coordinate conversion and background filtering.
+vector<DetectedCircle> Detector(const Mat& image,
+    const vector<HistogramReference>& references = ReferenceHistograms())
 {
     const vector<Vec3f> circles = HoughDetector(image);
     vector<Point2f> centers, transformed_centers;
@@ -123,7 +129,7 @@ vector<DetectedCircle> Detector(const Mat& image)
     vector<DetectedCircle> detections;
     for (size_t i = 0; i < circles.size(); ++i)
         detections.push_back({circles[i], transformed_centers[i]});
-    return detections;
+    return FilterOutTableCandidates(image, detections, references);
 }
 
 string BallClassName(int index)
@@ -200,6 +206,50 @@ vector<HistogramReference> BuildReferenceHistograms(const Mat& all_balls,
     if (!has_background)
         throw invalid_argument("Classification requires a labeled net or table reference.");
     return references;
+}
+
+// Build once and share the same references between detection and classification.
+const vector<HistogramReference>& ReferenceHistograms()
+{
+    static const auto references = BuildReferenceHistograms(
+        imread("Media/Pool/AllBalls.jpeg"), labeled_circles);
+    return references;
+}
+
+// Stage 1 appearance filter, called after the Hough detector.
+vector<DetectedCircle> FilterOutTableCandidates(const Mat& image,
+    const vector<DetectedCircle>& candidates, const vector<HistogramReference>& references)
+{
+    if (candidates.empty()) return {};
+    bool has_background = false, has_ball = false;
+    for (const auto& reference : references) {
+        const bool background = reference.label == "table" || reference.label == "net";
+        has_background = has_background || background;
+        if (!background) {
+            BallClassIndex(reference.label);
+            has_ball = true;
+        }
+    }
+    if (!has_background || !has_ball)
+        throw invalid_argument("Filtering requires ball and table reference histograms.");
+    Mat hls;
+    cvtColor(image, hls, COLOR_BGR2HLS);
+    vector<DetectedCircle> retained;
+    for (const auto& candidate : candidates) {
+        const Mat histogram = CalculateHLSHistogram(hls, candidate.image_circle);
+        if (histogram.empty()) continue;
+        double background_distance = 2.0, ball_distance = 2.0;
+        for (const auto& reference : references) {
+            const double distance = compareHist(histogram, reference.histogram, HISTCMP_BHATTACHARYYA);
+            if (reference.label == "table" || reference.label == "net")
+                background_distance = min(background_distance, distance);
+            else
+                ball_distance = min(ball_distance, distance);
+        }
+        // Equal distances favor rejection, matching the classifier's rule.
+        if (ball_distance < background_distance) retained.push_back(candidate);
+    }
+    return retained;
 }
 
 // Minimum-cost one-to-one assignment of rows to columns (columns >= rows).
@@ -955,7 +1005,7 @@ void RunEvaluationPass(bool visualize, bool save_perspective,
             }
             truth.push_back({center, BallClassName(i)});
         }
-        const vector<DetectedCircle> detections = Detector(source);
+        const vector<DetectedCircle> detections = Detector(source, references);
         vector<BallPrediction> detector_predictions;
         detector_predictions.reserve(detections.size());
         for (const auto& detection : detections)
@@ -965,8 +1015,6 @@ void RunEvaluationPass(bool visualize, bool save_perspective,
         detector_results.push_back({supplied.filename, detector_result, excluded - excluded_before});
         AddEvaluation(detector_total, detector_result);
         const vector<ClassifiedCircle> circles = Classifier(source, detections, references);
-        cout << supplied.filename << ": " << detections.size() << " candidates -> "
-             << circles.size() << " retained after Classifier\n";
         vector<BallPrediction> predictions;
         for (const auto& circle : circles)
             predictions.push_back({circle.detection.table_center, circle.label});
