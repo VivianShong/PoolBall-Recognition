@@ -1235,6 +1235,8 @@ void RunEvaluationPass(bool visualize, bool save_perspective,
         }
         vector<DetectedCircle> unfiltered;
         const vector<DetectedCircle> detections = Detector(source, references, &unfiltered);
+
+        // Evaluate Hough candidates before histogram filtering.
         vector<BallPrediction> hough_predictions;
         hough_predictions.reserve(unfiltered.size());
         for (const auto& detection : unfiltered)
@@ -1243,6 +1245,8 @@ void RunEvaluationPass(bool visualize, bool save_perspective,
         PrintEvaluation(string(supplied.filename) + " - before histogram filtering", hough_result, false);
         hough_results.push_back({supplied.filename, hough_result, excluded - excluded_before});
         AddEvaluation(hough_total, hough_result);
+
+        // Evaluate Stage 1 results after histogram filtering.
         vector<BallPrediction> detector_predictions;
         detector_predictions.reserve(detections.size());
         for (const auto& detection : detections)
@@ -1251,6 +1255,8 @@ void RunEvaluationPass(bool visualize, bool save_perspective,
         PrintEvaluation(string(supplied.filename) + " - detector only", detector_result, false);
         detector_results.push_back({supplied.filename, detector_result, excluded - excluded_before});
         AddEvaluation(detector_total, detector_result);
+
+        // Classify the retained candidates and evaluate Stage 2 results.
         const vector<ClassifiedCircle> circles = Classifier(source, detections, references);
         vector<BallPrediction> predictions;
         for (const auto& circle : circles)
@@ -1260,6 +1266,8 @@ void RunEvaluationPass(bool visualize, bool save_perspective,
         image_results.push_back({supplied.filename, result, excluded - excluded_before});
         AddEvaluation(total, result);
         ++evaluated_images;
+
+        // Generate, save and optionally display ground truth, predictions and evaluation outcomes.
         const Mat ground_truth_view = DrawGroundTruthCircles(source, truth, supplied.filename);
         const Mat labels_view = DrawDetectedCircles(source, circles, supplied.filename, detections.size());
         const Mat outcomes_view = DrawDetectionOutcomes(source, circles, truth, supplied.filename);
@@ -1376,6 +1384,4 @@ void MyApplication()
 		RunEvaluation();
 		waitKey();
 	}
-	
-
 }
