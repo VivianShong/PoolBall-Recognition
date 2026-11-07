@@ -319,20 +319,20 @@ struct GroundTruthImage {
 
 const vector<GroundTruthImage>& SuppliedGroundTruth()
 {
-    // Snapshot of "Ball Locations In Transformed Image (1).xlsx", Sheet1, rows 4-9.
+    // Snapshot of "Ball Locations In Transformed Image (Second correction).xlsx", Sheet1, rows 4-9.
     // Workbook Row,Column pairs become Point2f(Column,Row). Blank pairs are absent.
     // AllBalls is training data and is deliberately excluded from test totals.
     // Values are preserved as supplied; out-of-bounds entries are flagged below.
     static const vector<GroundTruthImage> truth = {
         {"Table1.jpeg", {{
-            Point2f(1092.0f, 309.0f), Point2f(429.0f, 1212.0f), Point2f(1174.0f, 353.0f), Point2f(335.0f, 1050.0f),
+            Point2f(1092.0f, 309.0f), Point2f(1212.0f, 429.0f), Point2f(1131.0f, 383.0f), Point2f(1050.0f, 335.0f),
             Point2f(1211.0f, 285.0f), Point2f(1170.0f, 261.0f), Point2f(1173.0f, 352.0f), Point2f(1132.0f, 331.0f),
-            Point2f(1210.0f, 240.0f), Point2f(1170.0f, 310.0f), Point2f(407.0f, 1169.0f), Point2f(1135.0f, 281.0f),
+            Point2f(1210.0f, 240.0f), Point2f(1170.0f, 310.0f), Point2f(1169.0f, 407.0f), Point2f(1135.0f, 281.0f),
             Point2f(1212.0f, 374.0f), Point2f(1091.0f, 360.0f), Point2f(1213.0f, 331.0f), Point2f(29.0f, 288.0f)
         }}},
         {"Table2.jpeg", {{
-            Point2f(1103.0f, 282.0f), Point2f(1224.0f, 620.0f), Point2f(1121.0f, 391.0f), Point2f(1305.0f, 310.0f),
-            Point2f(1046.0f, 315.0f), Point2f(621.0f, 202.0f), Point2f(1173.0f, 361.0f), Point2f(1132.0f, 331.0f),
+            Point2f(1103.0f, 282.0f), Point2f(1224.0f, 620.0f), Point2f(1121.0f, 391.0f), Point2f(1046.0f, 315.0f),
+            Point2f(1305.0f, 310.0f), Point2f(621.0f, 202.0f), Point2f(1173.0f, 361.0f), Point2f(1132.0f, 331.0f),
             Point2f(725.0f, 177.0f), Point2f(1269.0f, 185.0f), Point2f(798.0f, 665.0f), Point2f(438.0f, 296.0f),
             Point2f(1235.0f, 53.0f), Point2f(1090.0f, 362.0f), Point2f(1205.0f, 399.0f), Point2f(1169.0f, 507.0f)
         }}},
