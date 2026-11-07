@@ -1087,6 +1087,14 @@ void SaveConfusionFigure(const EvaluationResult& total, const app_fs::path& dire
                 FONT_HERSHEY_SIMPLEX, 1.4, i != j ? Scalar(0,110,240) : count >= 4 ? Scalar(255,255,255) : Scalar(0,0,0), 2, LINE_AA);
         }
     }
+    // Light cell boundaries make counts easier to trace across rows and columns.
+    const Scalar grid_color(215, 220, 225);
+    for (int boundary = 1; boundary <= BALL_CLASSES; ++boundary) {
+        line(chart, Point(left + boundary * cell_width, top),
+            Point(left + boundary * cell_width, top + 17 * cell_height), grid_color, 2, LINE_AA);
+        line(chart, Point(left, top + boundary * cell_height),
+            Point(left + 17 * cell_width, top + boundary * cell_height), grid_color, 2, LINE_AA);
+    }
     rectangle(chart, Rect(left, top, 17 * cell_width, 17 * cell_height), Scalar(0,0,0), 2);
     putText(chart, "Predicted identity", Point(650, 965), FONT_HERSHEY_SIMPLEX, 1.5, Scalar(0,0,0), 2, LINE_AA);
     imwrite((directory / "updated_gt_confusion.png").string(), chart);
