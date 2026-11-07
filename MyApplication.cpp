@@ -1215,6 +1215,8 @@ void RunEvaluationPass(bool visualize, bool save_perspective,
         return;
     }
     cout << "Precomputed " << references.size() << " circular HLS references (balls/table background).\n";
+    const auto hough_directory = directory / "visualizations" / "hough";
+    app_fs::create_directories(hough_directory);
     EvaluationResult total, detector_total, hough_total;
     size_t excluded = 0, evaluated_images = 0;
     vector<ImageEvaluation> image_results, detector_results, hough_results;
@@ -1243,6 +1245,11 @@ void RunEvaluationPass(bool visualize, bool save_perspective,
         }
         vector<DetectedCircle> unfiltered;
         const vector<DetectedCircle> detections = Detector(source, references, &unfiltered);
+
+        // Save unfiltered Hough candidates for every table in both coordinate systems.
+        const string table_name = app_fs::path(supplied.filename).stem().string();
+        SaveCandidateViews(source, unfiltered, hough_directory,
+            table_name + "_hough_candidates.png", table_name + "_hough_rectified.png");
 
         // Evaluate Hough candidates before histogram filtering.
         vector<BallPrediction> hough_predictions;
