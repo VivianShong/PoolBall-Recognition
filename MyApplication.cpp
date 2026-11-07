@@ -118,7 +118,8 @@ vector<DetectedCircle> FilterOutTableCandidates(const Mat& image,
 
 // Detection owns coordinate conversion and background filtering.
 vector<DetectedCircle> Detector(const Mat& image,
-    const vector<HistogramReference>& references = ReferenceHistograms())
+    const vector<HistogramReference>& references = ReferenceHistograms(),
+    vector<DetectedCircle>* unfiltered = nullptr)
 {
     const vector<Vec3f> circles = HoughDetector(image);
     vector<Point2f> centers, transformed_centers;
@@ -129,6 +130,7 @@ vector<DetectedCircle> Detector(const Mat& image,
     vector<DetectedCircle> detections;
     for (size_t i = 0; i < circles.size(); ++i)
         detections.push_back({circles[i], transformed_centers[i]});
+    if (unfiltered) *unfiltered = detections;
     return FilterOutTableCandidates(image, detections, references);
 }
 
@@ -607,6 +609,7 @@ void WriteEvaluationRow(ostream& file, const string& name,
 void WriteEvaluationCsv(const vector<ImageEvaluation>& images,
     const EvaluationResult& total, const vector<ExcludedGroundTruth>& exclusions,
     const vector<ImageEvaluation>& detector_images, const EvaluationResult& detector_total,
+    const vector<ImageEvaluation>& hough_images, const EvaluationResult& hough_total,
     const app_fs::path& directory = "output/evaluation")
 {
     try {
@@ -633,6 +636,7 @@ void WriteEvaluationCsv(const vector<ImageEvaluation>& images,
         };
         write_results("results.csv", images, total, true);
         write_results("detector_results.csv", detector_images, detector_total, false);
+        write_results("hough_results.csv", hough_images, hough_total, false);
 
         auto confusion = open_csv("confusion_matrix.csv");
         confusion << "ground_truth/prediction";
@@ -906,6 +910,23 @@ void SaveEvaluationViews(const string& filename, const Mat& ground_truth, const 
     }
 }
 
+// Draw either raw or filtered predictions without repeating detection or calibration.
+void SaveCandidateViews(const Mat& source, const vector<DetectedCircle>& predictions,
+    const app_fs::path& directory, const string& camera_name, const string& table_name)
+{
+    Mat camera_view = source.clone(), table_view;
+    warpPerspective(source, table_view, TablePerspectiveTransform(), TRANSFORMED_TABLE_SIZE);
+    for (const auto& prediction : predictions) {
+        const Vec3f c = prediction.image_circle;
+        circle(camera_view, Point(cvRound(c[0]), cvRound(c[1])), cvRound(c[2]),
+            Scalar(0, 255, 0), 2, LINE_AA);
+        circle(table_view, Point(cvRound(prediction.table_center.x), cvRound(prediction.table_center.y)),
+            cvRound(BALL_RADIUS), Scalar(0, 255, 0), 1, LINE_AA);
+    }
+    imwrite((directory / camera_name).string(), camera_view);
+    imwrite((directory / table_name).string(), table_view);
+}
+
 // Report-only detection views and histogram summaries; no parameter changes.
 void SaveReportProcessingViews()
 {
@@ -916,23 +937,14 @@ void SaveReportProcessingViews()
     if (training.empty() || source.empty())
         throw runtime_error("Cannot load report illustration images.");
     const auto references = BuildReferenceHistograms(training, labeled_circles);
-    const auto detections = Detector(source);
-    Mat grey, candidates = source.clone(), rectified;
+    vector<DetectedCircle> unfiltered;
+    const auto detections = Detector(source, references, &unfiltered);
+    Mat grey;
     cvtColor(source, grey, COLOR_BGR2GRAY);
-    for (const auto& detection : detections) {
-        const Vec3f c = detection.image_circle;
-        circle(candidates, Point(cvRound(c[0]), cvRound(c[1])), cvRound(c[2]),
-            Scalar(0, 255, 0), 2, LINE_AA);
-    }
-    warpPerspective(source, rectified, TablePerspectiveTransform(), TRANSFORMED_TABLE_SIZE);
-    for (const auto& detection : detections) {
-        const Point center(cvRound(detection.table_center.x), cvRound(detection.table_center.y));
-        circle(rectified, center, cvRound(BALL_RADIUS), Scalar(0, 255, 0), 1, LINE_AA);
-    }
     imwrite((directory / "Table3_input.png").string(), source);
     imwrite((directory / "Table3_grey.png").string(), grey);
-    imwrite((directory / "Table3_candidates.png").string(), candidates);
-    imwrite((directory / "Table3_rectified.png").string(), rectified);
+    SaveCandidateViews(source, detections, directory, "Table3_candidates.png", "Table3_rectified.png");
+    SaveCandidateViews(source, unfiltered, directory, "Table3_hough_candidates.png", "Table3_hough_rectified.png");
     Mat samples = training.clone();
     for (const auto& sample : labeled_circles) {
         const Point center(cvRound(sample.center.x), cvRound(sample.center.y));
@@ -958,6 +970,222 @@ void SaveReportProcessingViews()
     }
 }
 
+// Assemble full-resolution panels; only failure crops are enlarged for inspection.
+Mat ReportPanels(const vector<Mat>& images, const vector<string>& titles, int columns)
+{
+    if (images.empty() || images.size() != titles.size())
+        throw invalid_argument("Report panels require an image and title for each panel.");
+    int width = 0, height = 0;
+    for (const auto& image : images) {
+        if (image.empty()) throw runtime_error("Missing report panel image.");
+        width = max(width, image.cols);
+        height = max(height, image.rows);
+    }
+    const double scale = max(0.7, width / 1100.0);
+    const int header = cvRound(70 * scale), gap = 24;
+    const int rows = (static_cast<int>(images.size()) + columns - 1) / columns;
+    Mat panel(rows * (height + header + gap) + gap,
+        columns * (width + gap) + gap, CV_8UC3, Scalar(255, 255, 255));
+    for (size_t i = 0; i < images.size(); ++i) {
+        const int x = gap + (static_cast<int>(i) % columns) * (width + gap);
+        const int y = gap + (static_cast<int>(i) / columns) * (height + header + gap);
+        putText(panel, titles[i], Point(x, y + cvRound(43 * scale)),
+            FONT_HERSHEY_SIMPLEX, 1.7 * scale, Scalar(20, 20, 20), 2, LINE_AA);
+        Mat color;
+        if (images[i].channels() == 1) cvtColor(images[i], color, COLOR_GRAY2BGR);
+        else color = images[i];
+        color.copyTo(panel(Rect(x + (width - color.cols) / 2,
+            y + header + (height - color.rows) / 2, color.cols, color.rows)));
+    }
+    return panel;
+}
+
+void SaveHistogramFigure(const vector<HistogramReference>& references, const app_fs::path& directory)
+{
+    Mat chart(720, 2400, CV_8UC3, Scalar(255, 255, 255));
+    const vector<string> names = {"Hue", "Lightness", "Saturation"};
+    for (int channel = 0; channel < 3; ++channel) {
+        const int bins = channel == 0 ? 18 : 8;
+        const int left = 100 + channel * 800, top = 80, width = 650, height = 450;
+        const auto position = [&](int bin, double value) {
+            return Point(left + cvRound(bin * width / double(bins - 1)),
+                top + height - cvRound(value * height));
+        };
+        putText(chart, names[channel], Point(left + 160, 40), FONT_HERSHEY_SIMPLEX,
+            1.1, Scalar(0, 0, 0), 2, LINE_AA);
+        for (int tick = 0; tick <= 4; ++tick) {
+            const int y = top + height - tick * height / 4;
+            line(chart, Point(left, y), Point(left + width, y), Scalar(220, 220, 220), 1);
+            putText(chart, format("%.2f", tick / 4.0), Point(left - 90, y + 9),
+                FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 0, 0), 1, LINE_AA);
+        }
+        rectangle(chart, Rect(left, top, width + 1, height + 1), Scalar(0, 0, 0), 2);
+        for (int bin = 0; bin < bins; ++bin) {
+            const Point p = position(bin, 0);
+            line(chart, p, p + Point(0, 8), Scalar(0, 0, 0), 2);
+            if (bins == 8 || bin % 4 == 0 || bin == bins - 1)
+                putText(chart, to_string(bin), p + Point(-10, 38), FONT_HERSHEY_SIMPLEX,
+                    0.8, Scalar(0, 0, 0), 1, LINE_AA);
+        }
+        putText(chart, "Bin", Point(left + 290, 610), FONT_HERSHEY_SIMPLEX,
+            1.0, Scalar(0, 0, 0), 2, LINE_AA);
+        for (const auto& reference : references) {
+            const bool background = reference.label == "table" || reference.label == "net";
+            if (!background && reference.label != "1" && reference.label != "9" && reference.label != "White") continue;
+            vector<double> marginal(bins, 0);
+            for (int h = 0; h < 18; ++h)
+                for (int l = 0; l < 8; ++l)
+                    for (int sat = 0; sat < 8; ++sat)
+                        marginal[channel == 0 ? h : channel == 1 ? l : sat] += reference.histogram.at<float>(h, l, sat);
+            const Scalar color = background ? Scalar(69, 139, 35) : reference.label == "1"
+                ? Scalar(0, 185, 230) : reference.label == "9" ? Scalar(180, 110, 0) : Scalar(110, 110, 110);
+            for (int bin = 1; bin < bins; ++bin) {
+                const Point a = position(bin - 1, marginal[bin - 1]), b = position(bin, marginal[bin]);
+                if (!background) line(chart, a, b, color, 4, LINE_AA);
+                else {
+                    const double length = norm(b - a);
+                    for (double d = 0; d < length; d += 18) {
+                        const Point2d delta(b.x - a.x, b.y - a.y);
+                        const Point2d begin = Point2d(a.x, a.y) + delta * (d / length);
+                        const Point2d end = Point2d(a.x, a.y) + delta * (min(d + 10, length) / length);
+                        line(chart, Point(cvRound(begin.x), cvRound(begin.y)),
+                            Point(cvRound(end.x), cvRound(end.y)), color, 2, LINE_AA);
+                    }
+                }
+            }
+        }
+    }
+    putText(chart, "Probability", Point(16, 36), FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 0, 0), 1, LINE_AA);
+    const vector<string> labels = {"1", "9", "White", "table: 6 samples (dashed)"};
+    const vector<Scalar> colors = {Scalar(0,185,230), Scalar(180,110,0), Scalar(110,110,110), Scalar(69,139,35)};
+    for (int i = 0; i < 4; ++i) {
+        const int x = 270 + i * 440;
+        line(chart, Point(x, 675), Point(x + 60, 675), colors[i], 4, LINE_AA);
+        putText(chart, labels[i], Point(x + 80, 685), FONT_HERSHEY_SIMPLEX,
+            0.85, Scalar(0, 0, 0), 2, LINE_AA);
+    }
+    imwrite((directory / "histogram_marginals.png").string(), chart);
+}
+
+void SaveConfusionFigure(const EvaluationResult& total, const app_fs::path& directory)
+{
+    const int left = 150, top = 80, cell_width = 88, cell_height = 46;
+    Mat chart(990, 1740, CV_8UC3, Scalar(255, 255, 255));
+    putText(chart, "Truth", Point(15, 50), FONT_HERSHEY_SIMPLEX, 1.4, Scalar(0,0,0), 2, LINE_AA);
+    for (int i = 0; i <= BALL_CLASSES; ++i) {
+        const string label = i == BACKGROUND ? "BG" : i == 15 ? "W" : to_string(i + 1);
+        putText(chart, label, Point(left - 75, top + i * cell_height + 33),
+            FONT_HERSHEY_SIMPLEX, 1.4, Scalar(0,0,0), 2, LINE_AA);
+        putText(chart, label, Point(left + i * cell_width + 22, top + 17 * cell_height + 50),
+            FONT_HERSHEY_SIMPLEX, 1.4, Scalar(0,0,0), 2, LINE_AA);
+        for (int j = 0; j <= BALL_CLASSES; ++j) {
+            const int count = static_cast<int>(total.confusion[i][j]);
+            const double strength = min(1.0, count / 6.0);
+            const Scalar fill(255 - 110 * strength, 250 - 210 * strength, 245 - 235 * strength);
+            rectangle(chart, Rect(left + j * cell_width, top + i * cell_height, cell_width, cell_height), fill, FILLED);
+            if (count) putText(chart, to_string(count), Point(left + j * cell_width + 30, top + i * cell_height + 33),
+                FONT_HERSHEY_SIMPLEX, 1.4, i != j ? Scalar(0,110,240) : count >= 4 ? Scalar(255,255,255) : Scalar(0,0,0), 2, LINE_AA);
+        }
+    }
+    rectangle(chart, Rect(left, top, 17 * cell_width, 17 * cell_height), Scalar(0,0,0), 2);
+    putText(chart, "Predicted identity", Point(650, 965), FONT_HERSHEY_SIMPLEX, 1.5, Scalar(0,0,0), 2, LINE_AA);
+    imwrite((directory / "updated_gt_confusion.png").string(), chart);
+}
+
+// Generate every report illustration from reference data and current predictions.
+void SaveReportFigures(const vector<HistogramReference>& references, const EvaluationResult& total,
+    const app_fs::path& evaluation_directory)
+{
+    const auto directory = evaluation_directory / "report_assets";
+    app_fs::create_directories(directory);
+    vector<Mat> stages;
+    for (const string name : {"Table3_input.png", "Table3_grey.png", "Table3_hough_candidates.png", "Table3_hough_rectified.png"})
+        stages.push_back(imread((directory / name).string()));
+    imwrite((directory / "processing_stages.png").string(), ReportPanels(stages,
+        {"(a) Camera image", "(b) Grayscale", "(c) All Hough candidates", "(d) All transformed centers"}, 2));
+    SaveHistogramFigure(references, directory);
+    SaveConfusionFigure(total, directory);
+    vector<Mat> truth_views, outcome_views, failures;
+    vector<string> truth_titles, outcome_titles, failure_titles;
+    for (const auto& supplied : SuppliedGroundTruth()) {
+        const Mat source = imread(string("Media/Pool/") + supplied.filename);
+        if (source.empty()) throw runtime_error("Missing report source image.");
+        vector<BallPrediction> truth, predictions;
+        for (int i = 0; i < BALL_CLASSES; ++i) {
+            const Point2f c = supplied.centers[i];
+            if (isfinite(c.x) && isfinite(c.y) && c.x >= 0 && c.y >= 0
+                && c.x < TRANSFORMED_TABLE_SIZE.width && c.y < TRANSFORMED_TABLE_SIZE.height)
+                truth.push_back({c, BallClassName(i)});
+        }
+        const auto detected = Detector(source, references);
+        const auto classified = Classifier(source, detected, references);
+        for (const auto& ball : classified) predictions.push_back({ball.detection.table_center, ball.label});
+        const auto matches = MatchCenters(predictions, truth);
+        vector<bool> used(predictions.size(), false);
+        Mat table;
+        warpPerspective(source, table, TablePerspectiveTransform(), TRANSFORMED_TABLE_SIZE);
+        Mat actual = table.clone(), outcome = table.clone();
+        const string name = app_fs::path(supplied.filename).stem().string();
+        if (outcome_views.empty()) {
+            Mat positions = table.clone();
+            for (const auto& prediction : predictions)
+                circle(positions, Point(cvRound(prediction.center.x), cvRound(prediction.center.y)),
+                    cvRound(BALL_RADIUS), Scalar(0,255,0), 2, LINE_AA);
+            for (const auto& prediction : predictions)
+                DrawOverlayLabel(positions, prediction.label,
+                    Point(cvRound(prediction.center.x), cvRound(prediction.center.y)), Scalar(255,255,255));
+            imwrite((directory / "Table1_labels_perspective.png").string(), positions);
+        }
+        const auto failure_crop = [&](const Point2f& center, const Scalar& color, const string& title) {
+            const int side = 130;
+            const Rect region = Rect(cvRound(center.x) - side/2, cvRound(center.y) - side/2, side, side)
+                & Rect(0,0,table.cols,table.rows);
+            Mat crop;
+            resize(table(region), crop, Size(), 4.0, 4.0, INTER_CUBIC);
+            circle(crop, Point(cvRound((center.x - region.x)*4), cvRound((center.y - region.y)*4)),
+                cvRound(BALL_RADIUS*4), color, 5, LINE_AA);
+            failures.push_back(crop);
+            failure_titles.push_back(title);
+        };
+        for (size_t i = 0; i < truth.size(); ++i) {
+            const Point c(cvRound(truth[i].center.x), cvRound(truth[i].center.y));
+            circle(actual, c, cvRound(BALL_RADIUS), Scalar(255,255,0), 2, LINE_AA);
+            DrawOverlayLabel(actual, truth[i].label, c, Scalar(255,255,0));
+            if (matches[i] < 0) {
+                circle(outcome, c, cvRound(BALL_RADIUS), Scalar(255,0,255), 3, LINE_AA);
+                DrawOverlayLabel(outcome, "miss " + truth[i].label, c, Scalar(255,0,255));
+                failure_crop(truth[i].center, Scalar(255,0,255), name + ": " + truth[i].label + " missed");
+                continue;
+            }
+            const int j = matches[i];
+            used[j] = true;
+            const bool correct = truth[i].label == predictions[j].label;
+            const Scalar color = correct ? Scalar(0,190,0) : Scalar(0,165,255);
+            const Point p(cvRound(predictions[j].center.x), cvRound(predictions[j].center.y));
+            circle(outcome, p, cvRound(BALL_RADIUS), color, 2, LINE_AA);
+            DrawOverlayLabel(outcome, correct ? predictions[j].label : truth[i].label + ">" + predictions[j].label, p, color);
+            if (!correct) failure_crop(predictions[j].center, color,
+                name + ": " + truth[i].label + " -> " + predictions[j].label);
+        }
+        for (size_t j = 0; j < predictions.size(); ++j) if (!used[j]) {
+            const Point p(cvRound(predictions[j].center.x), cvRound(predictions[j].center.y));
+            circle(outcome, p, cvRound(BALL_RADIUS), Scalar(0,0,255), 2, LINE_AA);
+            DrawOverlayLabel(outcome, "FP " + predictions[j].label, p, Scalar(0,0,255));
+            failure_crop(predictions[j].center, Scalar(0,0,255), name + ": FP " + predictions[j].label);
+        }
+        if (truth_views.size() < 2) {
+            truth_views.push_back(actual);
+            truth_titles.push_back(name + ": supplied ground truth");
+        }
+        outcome_views.push_back(outcome);
+        outcome_titles.push_back(name);
+    }
+    imwrite((directory / "updated_supplied_ground_truth.png").string(), ReportPanels(truth_views, truth_titles, 1));
+    imwrite((directory / "updated_gt_outcomes_perspective.png").string(), ReportPanels(outcome_views, outcome_titles, 2));
+    if (!failures.empty()) imwrite((directory / "updated_gt_failure_crops.png").string(),
+        ReportPanels(failures, failure_titles, min(3, static_cast<int>(failures.size()))));
+}
+
 void RunEvaluationPass(bool visualize, bool save_perspective,
     const app_fs::path& directory)
 {
@@ -979,9 +1207,9 @@ void RunEvaluationPass(bool visualize, bool save_perspective,
         return;
     }
     cout << "Precomputed " << references.size() << " circular HLS references (balls/table background).\n";
-    EvaluationResult total, detector_total;
+    EvaluationResult total, detector_total, hough_total;
     size_t excluded = 0, evaluated_images = 0;
-    vector<ImageEvaluation> image_results, detector_results;
+    vector<ImageEvaluation> image_results, detector_results, hough_results;
     vector<ExcludedGroundTruth> exclusions;
     for (const auto& supplied : SuppliedGroundTruth()) {
         const Mat source = imread(string("Media/Pool/") + supplied.filename);
@@ -1005,7 +1233,16 @@ void RunEvaluationPass(bool visualize, bool save_perspective,
             }
             truth.push_back({center, BallClassName(i)});
         }
-        const vector<DetectedCircle> detections = Detector(source, references);
+        vector<DetectedCircle> unfiltered;
+        const vector<DetectedCircle> detections = Detector(source, references, &unfiltered);
+        vector<BallPrediction> hough_predictions;
+        hough_predictions.reserve(unfiltered.size());
+        for (const auto& detection : unfiltered)
+            hough_predictions.push_back({detection.table_center, ""});
+        const EvaluationResult hough_result = Evaluation(hough_predictions, truth, false);
+        PrintEvaluation(string(supplied.filename) + " - before histogram filtering", hough_result, false);
+        hough_results.push_back({supplied.filename, hough_result, excluded - excluded_before});
+        AddEvaluation(hough_total, hough_result);
         vector<BallPrediction> detector_predictions;
         detector_predictions.reserve(detections.size());
         for (const auto& detection : detections)
@@ -1049,6 +1286,7 @@ void RunEvaluationPass(bool visualize, bool save_perspective,
     if (visualize && evaluated_images > 0) {
         destroyWindow("Pool ball evaluation");
     }
+    PrintEvaluation("Pooled total - before histogram filtering", hough_total, false);
     PrintEvaluation("Pooled total - detector only", detector_total, false);
     PrintEvaluation("Pooled total - after classification/filtering", total);
     cout << "Evaluated images: " << evaluated_images << "/6; excluded GT entries: " << excluded << '\n';
@@ -1062,7 +1300,15 @@ void RunEvaluationPass(bool visualize, bool save_perspective,
         for (int j = 0; j <= BALL_CLASSES; ++j) cout << setw(6) << total.confusion[i][j];
         cout << '\n';
     }
-    WriteEvaluationCsv(image_results, total, exclusions, detector_results, detector_total, directory);
+    WriteEvaluationCsv(image_results, total, exclusions, detector_results, detector_total,
+        hough_results, hough_total, directory);
+    if (evaluated_images == SuppliedGroundTruth().size()) {
+        try {
+            SaveReportFigures(references, total, directory);
+        } catch (const exception& error) {
+            cerr << "Could not save report figures: " << error.what() << '\n';
+        }
+    }
 }
 
 void RunEvaluation(bool visualize = true, bool save_perspective = true)
