@@ -1180,7 +1180,7 @@ void SaveReportFigures(const vector<HistogramReference>& references, const Evalu
         outcome_views.push_back(outcome);
         outcome_titles.push_back(name);
     }
-    imwrite((directory / "updated_supplied_ground_truth.png").string(), ReportPanels(truth_views, truth_titles, 1));
+    imwrite((directory / "updated_supplied_ground_truth.png").string(), ReportPanels(truth_views, truth_titles, 2));
     imwrite((directory / "updated_gt_outcomes_perspective.png").string(), ReportPanels(outcome_views, outcome_titles, 2));
     if (!failures.empty()) imwrite((directory / "updated_gt_failure_crops.png").string(),
         ReportPanels(failures, failure_titles, min(3, static_cast<int>(failures.size()))));
